@@ -3,6 +3,10 @@
 
 //! `usbnexus` command line tool.
 
+// Device commands are Linux-only until the Windows/macOS backends land;
+// their helpers are unused elsewhere.
+#![cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
+
 #[cfg(unix)]
 mod admin;
 mod ui;

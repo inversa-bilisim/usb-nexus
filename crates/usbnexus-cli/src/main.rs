@@ -606,6 +606,7 @@ async fn list(ctx: &Ctx, server: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", windows))]
 async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
     let cfg = ctx.client_config()?;
     let target = Target::parse(server, &cfg.trust);
@@ -616,8 +617,6 @@ async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
     };
     #[cfg(windows)]
     let backend = Arc::new(usbnexus_core::windows::WindowsImport::default());
-    #[cfg(not(any(target_os = "linux", windows)))]
-    let backend: Arc<usbnexus_core::backend::demo::DemoImport> = bail!(t!("unsupported-os"));
     let events = |ev: AttachEvent| match ev {
         AttachEvent::Connecting { addr } => println!("{}", t!("attach-connecting", addr = addr)),
         AttachEvent::Attached { port, .. } => {
@@ -639,6 +638,11 @@ async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
             Ok(())
         }
     }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+async fn attach(_: &Ctx, _: &str, _: &str) -> Result<()> {
+    bail!(t!("unsupported-os"))
 }
 
 fn peer_rows(store: &TrustStore) -> Vec<Vec<String>> {

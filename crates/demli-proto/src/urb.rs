@@ -269,7 +269,9 @@ impl UrbMessage {
                     used,
                 ))
             }
-            CMD_UNLINK => Ok((UrbMessage::CmdUnlink(CmdUnlink { header, unlink_seqnum: b.get_u32() }), URB_HEADER_SIZE)),
+            CMD_UNLINK => {
+                Ok((UrbMessage::CmdUnlink(CmdUnlink { header, unlink_seqnum: b.get_u32() }), URB_HEADER_SIZE))
+            }
             RET_UNLINK => Ok((UrbMessage::RetUnlink(RetUnlink { header, status: b.get_i32() }), URB_HEADER_SIZE)),
             other => Err(ProtoError::UnknownCommand(other)),
         }
@@ -345,7 +347,10 @@ mod tests {
     fn unlink() {
         roundtrip(UrbMessage::CmdUnlink(CmdUnlink { header: hdr(0), unlink_seqnum: 5 }), None);
         roundtrip(UrbMessage::RetUnlink(RetUnlink { header: hdr(0), status: -104 }), None);
-        assert_eq!(UrbMessage::CmdUnlink(CmdUnlink { header: hdr(0), unlink_seqnum: 5 }).encode().len(), URB_HEADER_SIZE);
+        assert_eq!(
+            UrbMessage::CmdUnlink(CmdUnlink { header: hdr(0), unlink_seqnum: 5 }).encode().len(),
+            URB_HEADER_SIZE
+        );
     }
 
     #[test]

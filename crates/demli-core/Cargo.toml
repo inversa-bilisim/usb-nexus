@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-demli-proto.workspace = true
+demli-proto = { workspace = true, features = ["serde"] }
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

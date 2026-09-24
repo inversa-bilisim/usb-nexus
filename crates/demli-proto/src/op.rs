@@ -22,10 +22,18 @@ pub const ST_NA: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpMessage {
     ReqDevlist,
-    RepDevlist { status: u32, devices: Vec<DeviceInfo> },
-    ReqImport { busid: String },
+    RepDevlist {
+        status: u32,
+        devices: Vec<DeviceInfo>,
+    },
+    ReqImport {
+        busid: String,
+    },
     /// `device` is present only when `status == ST_OK`.
-    RepImport { status: u32, device: Option<DeviceInfo> },
+    RepImport {
+        status: u32,
+        device: Option<DeviceInfo>,
+    },
 }
 
 impl OpMessage {
@@ -77,10 +85,7 @@ impl OpMessage {
                 let mut off = 4;
                 // Every record is at least DEVICE_WIRE_SIZE bytes; reject absurd counts early.
                 if n > body.len() / crate::device::DEVICE_WIRE_SIZE + 1 {
-                    return Err(ProtoError::Truncated {
-                        need: n * crate::device::DEVICE_WIRE_SIZE,
-                        have: body.len(),
-                    });
+                    return Err(ProtoError::Truncated { need: n * crate::device::DEVICE_WIRE_SIZE, have: body.len() });
                 }
                 let mut devices = Vec::with_capacity(n);
                 for _ in 0..n {

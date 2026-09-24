@@ -10,3 +10,7 @@ repository.workspace = true
 [dependencies]
 bytes.workspace = true
 thiserror.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+serde = ["dep:serde"]

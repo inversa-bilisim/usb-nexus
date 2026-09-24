@@ -14,6 +14,7 @@ pub const INTERFACE_WIRE_SIZE: usize = 4;
 
 /// USB device speed as defined by `enum usb_device_speed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u32)]
 pub enum Speed {
     Unknown = 0,
@@ -70,6 +71,7 @@ impl Speed {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InterfaceInfo {
     pub class: u8,
     pub subclass: u8,
@@ -77,6 +79,7 @@ pub struct InterfaceInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DeviceInfo {
     pub path: String,
     pub busid: String,

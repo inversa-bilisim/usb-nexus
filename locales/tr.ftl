@@ -214,3 +214,32 @@ gui-service-down-macos = macOS'ta şunu çalıştırın:
 gui-retry = Yeniden dene
 gui-details = Ayrıntılar
 err-service-unavailable = USB Nexus hizmetine ulaşılamadı.
+
+## Web interface
+
+gui-web-login-title = { $name } oturumunu aç
+gui-web-password = Parola
+gui-web-sign-in = Giriş yap
+gui-web-sign-out = Çıkış yap
+gui-web-wrong-password = Parola yanlış.
+gui-web-locked = Çok fazla deneme. { $seconds } saniye sonra yeniden deneyin.
+cmd-web-about = Web arayüzünü aç veya kapat.
+cmd-enable-about = Web arayüzünü aç (ilk seferde parola sorar).
+cmd-disable-about = Web arayüzünü kapat.
+cmd-password-about = Web arayüzü parolasını değiştir.
+cmd-status-about = Web arayüzünün açık olup olmadığını ve adresini göster.
+arg-lan = Ağdaki diğer bilgisayarlardan erişime izin ver.
+arg-port = Web arayüzünün TCP bağlantı noktası.
+web-on = Web arayüzü açık:
+web-off = Web arayüzü kapalı.
+web-local-only = Yalnızca bu bilgisayardan açılabilir. Diğer bilgisayarlar için --lan kullanın.
+web-fingerprint = Tarayıcı sertifika uyarısı verecek; sertifikanın parmak izi şu olmalı: { $fp }
+web-not-running = Web arayüzü etkin ama başlatılamadı: { $detail }
+web-password-prompt = Yeni web arayüzü parolası:
+web-password-repeat = Parolayı tekrar girin:
+web-password-mismatch = Parolalar eşleşmiyor.
+web-password-set = Web arayüzü parolası değiştirildi.
+err-weak-password = Parola en az 8 karakter olmalıdır.
+err-password-required = Önce bir web arayüzü parolası belirleyin: usbnexus web password
+err-forbidden = Bu yalnızca bilgisayarın kendisinden değiştirilebilir.
+err-not-logged-in = Lütfen yeniden giriş yapın.

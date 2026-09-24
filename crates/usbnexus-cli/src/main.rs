@@ -85,8 +85,25 @@ enum ServiceCmd {
 }
 
 #[derive(Subcommand)]
+enum WebCmd {
+    Enable {
+        #[arg(long)]
+        lan: bool,
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    Disable,
+    Password,
+    Status,
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     Daemon(ServeOpts),
+    Web {
+        #[command(subcommand)]
+        action: WebCmd,
+    },
     #[cfg(windows)]
     Service {
         #[command(subcommand)]
@@ -259,6 +276,7 @@ fn main() -> ExitCode {
 async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Daemon(opts) | Cmd::Serve(opts) => run_daemon(ctx, opts, shutdown_signal()).await,
+        Cmd::Web { action } => web(ctx, action).await,
         #[cfg(windows)]
         Cmd::Service { action: ServiceCmd::Install } => winservice::install(),
         #[cfg(windows)]
@@ -660,6 +678,69 @@ async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
 #[cfg(not(any(target_os = "linux", windows)))]
 async fn attach(_: &Ctx, _: &str, _: &str) -> Result<()> {
     bail!(t!("unsupported-os"))
+}
+
+/// Asks for a new web password twice, without echo.
+fn prompt_new_password() -> Result<String> {
+    let first = rpassword::prompt_password(format!("{} ", t!("web-password-prompt")))?;
+    let second = rpassword::prompt_password(format!("{} ", t!("web-password-repeat")))?;
+    if first != second {
+        bail!(t!("web-password-mismatch"));
+    }
+    Ok(first)
+}
+
+fn print_web_status(s: &usbnexus_core::api::WebStatusView) {
+    if !s.enabled {
+        println!("{}", t!("web-off"));
+        return;
+    }
+    if let Some(e) = &s.error {
+        println!("{}", t!("web-not-running", detail = e.as_str()));
+        return;
+    }
+    println!("{}", t!("web-on"));
+    for u in &s.urls {
+        println!("  {u}");
+    }
+    if !s.lan {
+        println!("{}", t!("web-local-only"));
+    }
+    if let Some(fp) = &s.fingerprint {
+        println!("{}", t!("web-fingerprint", fp = short_fingerprint(fp)));
+    }
+}
+
+async fn web(ctx: &Ctx, action: WebCmd) -> Result<()> {
+    use usbnexus_core::api::{self, Request, WebStatusView};
+    let call = |req: Request| {
+        let socket = ctx.socket.clone();
+        async move { api::call::<WebStatusView>(&socket, &req).await }
+    };
+    let status = match action {
+        WebCmd::Status => call(Request::WebStatus).await?,
+        WebCmd::Disable => {
+            call(Request::WebConfigure { enabled: Some(false), lan: None, port: None, password: None }).await?
+        }
+        WebCmd::Password => {
+            let password = tokio::task::spawn_blocking(prompt_new_password).await??;
+            let s =
+                call(Request::WebConfigure { enabled: None, lan: None, port: None, password: Some(password) }).await?;
+            println!("{}", t!("web-password-set"));
+            s
+        }
+        WebCmd::Enable { lan, port } => {
+            let current = call(Request::WebStatus).await?;
+            let password = if current.password_set {
+                None
+            } else {
+                Some(tokio::task::spawn_blocking(prompt_new_password).await??)
+            };
+            call(Request::WebConfigure { enabled: Some(true), lan: Some(lan), port, password }).await?
+        }
+    };
+    print_web_status(&status);
+    Ok(())
 }
 
 fn peer_rows(store: &TrustStore) -> Vec<Vec<String>> {

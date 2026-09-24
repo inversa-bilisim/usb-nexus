@@ -217,3 +217,32 @@ gui-service-down-macos = On macOS run:
 gui-retry = Try again
 gui-details = Details
 err-service-unavailable = The USB Nexus service could not be reached.
+
+## Web interface
+
+gui-web-login-title = Sign in to { $name }
+gui-web-password = Password
+gui-web-sign-in = Sign in
+gui-web-sign-out = Sign out
+gui-web-wrong-password = Wrong password.
+gui-web-locked = Too many attempts. Try again in { $seconds } seconds.
+cmd-web-about = Turn the web interface on or off.
+cmd-enable-about = Turn the web interface on (asks for a password the first time).
+cmd-disable-about = Turn the web interface off.
+cmd-password-about = Change the web interface password.
+cmd-status-about = Show whether the web interface is on and where.
+arg-lan = Allow access from other computers on the network.
+arg-port = TCP port of the web interface.
+web-on = The web interface is on:
+web-off = The web interface is off.
+web-local-only = Only this computer can open it. Use --lan to allow other computers.
+web-fingerprint = The browser will warn about the certificate; its fingerprint should be: { $fp }
+web-not-running = The web interface is enabled but could not start: { $detail }
+web-password-prompt = New web interface password:
+web-password-repeat = Repeat the password:
+web-password-mismatch = The passwords do not match.
+web-password-set = The web interface password was changed.
+err-weak-password = The password must be at least 8 characters long.
+err-password-required = Set a web interface password first: usbnexus web password
+err-forbidden = This can only be changed on the computer itself.
+err-not-logged-in = Please sign in again.

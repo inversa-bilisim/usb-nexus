@@ -62,6 +62,28 @@ target/debug/usbnexus-desktop
 Bir `v*` sürüm etiketi pushlandığında `.github/workflows/release.yml` hepsini üretir ve taslak bir
 GitHub sürümüne ekler.
 
+## Web arayüzü
+
+| | |
+|---|---|
+| <img src="docs/screenshots/web-login.png" width="400" alt="Web arayüzü girişi"> | <img src="docs/screenshots/web-main.png" width="400" alt="Web arayüzü"> |
+
+Ekransız sunucular (ör. yazıcı paylaşan bir Raspberry Pi) tarayıcıdan yönetilebilir. Arayüz masaüstü
+uygulamasıyla aynıdır; hizmet tarafından HTTPS ile sunulur ve varsayılan olarak **kapalıdır**.
+
+```sh
+sudo usbnexus web enable          # yalnızca bu bilgisayardan: https://localhost:3242 (parola sorar)
+sudo usbnexus web enable --lan    # ağdaki diğer bilgisayarlardan da
+sudo usbnexus web status          # adresler ve sertifika parmak izi
+sudo usbnexus web password        # parolayı değiştir
+sudo usbnexus web disable
+```
+
+- Parola Argon2 ile saklanır; aynı adresten 5 hatalı denemeden sonra giriş 60 saniye kilitlenir.
+- Sertifika kendinden imzalıdır: tarayıcı ilk girişte uyarır; `web status` çıktısındaki parmak iziyle doğrulayın.
+- Oturum çerezi `HttpOnly; Secure; SameSite=Strict`, sayfalar sıkı bir CSP ile sunulur.
+- Web arayüzünün kendi ayarları yalnızca bilgisayarın kendisinden (komut satırı) değiştirilebilir.
+
 ## Derleme
 
 Linux'ta masaüstü uygulaması için önce sistem kütüphaneleri gerekir:

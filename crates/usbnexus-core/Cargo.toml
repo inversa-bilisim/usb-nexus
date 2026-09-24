@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 usbnexus-proto = { workspace = true, features = ["serde"] }
+usbnexus-i18n.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -25,6 +26,12 @@ serde_json.workspace = true
 mdns-sd.workspace = true
 tracing.workspace = true
 subtle.workspace = true
+# Web interface
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio", "http1"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "service"] }
+argon2 = "0.5"
+if-addrs = "0.13"
 
 # Userspace USB access (macOS device sharing; optional elsewhere).
 rusb = { version = "0.9", features = ["vendored"], optional = true }

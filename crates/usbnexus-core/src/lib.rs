@@ -29,6 +29,7 @@ pub mod server;
 pub mod tls;
 pub mod trust;
 pub mod usb_server;
+pub mod web;
 
 #[cfg(any(target_os = "macos", feature = "libusb"))]
 pub mod libusb_host;

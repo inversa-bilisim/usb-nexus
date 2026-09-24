@@ -742,4 +742,6 @@ async function main() {
   startPolling();
 }
 
-main();
+// In the web interface, web.js starts the app after signing in.
+window.usbnexusStart = main;
+if (!window.USBNEXUS_WEB) main();

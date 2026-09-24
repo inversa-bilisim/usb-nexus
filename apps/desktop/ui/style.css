@@ -662,3 +662,29 @@ select {
     transition: none !important;
   }
 }
+
+/* Web interface sign-in */
+
+.app.login-mode {
+  grid-template-columns: 1fr;
+}
+
+.login-wrap {
+  display: grid;
+  place-items: center;
+  min-height: 80vh;
+}
+
+.modal.login {
+  box-shadow: var(--shadow-lg);
+}
+
+.login-logo {
+  width: 44px;
+  height: 44px;
+  margin-bottom: 10px;
+}
+
+#web-extra:empty {
+  display: none;
+}

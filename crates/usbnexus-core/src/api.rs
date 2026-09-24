@@ -51,6 +51,19 @@ pub enum Request {
     Forget {
         fingerprint: String,
     },
+    WebStatus,
+    /// Changes the web interface settings; fields left out are unchanged.
+    /// Refused when it arrives through the web interface itself.
+    WebConfigure {
+        #[serde(default)]
+        enabled: Option<bool>,
+        #[serde(default)]
+        lan: Option<bool>,
+        #[serde(default)]
+        port: Option<u16>,
+        #[serde(default)]
+        password: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -188,6 +201,20 @@ pub struct AttachmentView {
     pub product_id: Option<u16>,
     #[serde(flatten)]
     pub state: AttachState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebStatusView {
+    pub enabled: bool,
+    pub lan: bool,
+    pub port: u16,
+    pub password_set: bool,
+    /// Where the interface can be opened (empty when off).
+    pub urls: Vec<String>,
+    /// SHA-256 fingerprint of the HTTPS certificate, to check browser warnings.
+    pub fingerprint: Option<String>,
+    /// Why the interface is not running although enabled.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

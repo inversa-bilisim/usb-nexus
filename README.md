@@ -91,7 +91,7 @@ yeniden bulur.
 |---|---|---|
 | Linux sunucu ↔ Linux istemci | Çekirdekteki `usbip-host` / `vhci-hcd` | Çalışıyor (donanım testi bekliyor) |
 | Windows istemci | usbip-win2 (attestation imzalı, BSD-2) | Yazıldı; gerçek Windows'ta test bekliyor ([ayrıntılar](packaging/windows/README.md)) |
-| Windows sunucu | VBoxUSB (Oracle, Microsoft imzalı, GPL-3.0) | Planlandı |
+| Windows sunucu | VBoxUSB (Oracle + Microsoft imzalı, GPL-3.0) | Yazıldı; gerçek Windows'ta test bekliyor |
 | Grafik arayüz (Linux) | Tauri, aynı `locales/` çevirileri | Çalışıyor (demo ile test edildi) |
 | Grafik arayüz (Windows) | Hizmetle adlandırılmış kanal (`\\.\pipe\usbnexus`) | Yazıldı; test bekliyor |
 | Grafik arayüz (macOS) | — | Planlandı |

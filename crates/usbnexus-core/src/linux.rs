@@ -168,7 +168,14 @@ impl DeviceHost for LinuxHost {
         self.unbind(busid)
     }
 
-    fn export(&self, busid: &str) -> Result<tokio::net::TcpStream> {
+    fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
+        // sysfs writes are quick; no need to leave the async context.
+        Box::pin(async move { self.export_now(busid) })
+    }
+}
+
+impl LinuxHost {
+    fn export_now(&self, busid: &str) -> Result<tokio::net::TcpStream> {
         self.bind(busid)?;
         let dev = self.sys.join("bus/usb/devices").join(busid);
         let status = read_attr(&dev, "usbip_status").unwrap_or_default();
@@ -330,7 +337,8 @@ mod tests {
 
         let shared = SharedExport::new(Arc::new(LinuxHost::new(tmp.path())), ["1-2".into(), "9-9".into()]);
         assert_eq!(shared.list().unwrap().len(), 1, "missing devices are skipped");
-        assert!(shared.export("3-3").is_err(), "unshared devices are refused");
+        let refused = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(shared.export("3-3"));
+        assert!(refused.is_err(), "unshared devices are refused");
     }
 
     #[test]

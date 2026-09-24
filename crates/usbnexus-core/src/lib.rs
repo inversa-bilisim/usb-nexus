@@ -28,11 +28,14 @@ pub mod relay;
 pub mod server;
 pub mod tls;
 pub mod trust;
+pub mod usb_server;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+pub mod windows_host;
 
 /// Default TCP port of the USB Nexus service. The plain USB/IP port (3240) is
 /// left free so USB Nexus can coexist with the stock `usbipd`.

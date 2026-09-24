@@ -125,6 +125,7 @@ err-protocol = Unexpected response from the server.
 err-connection-lost = The connection to the computer was lost.
 err-unsupported = This is not available on this operating system yet.
 err-driver-missing = The usbip-win2 driver is not installed. Install it from github.com/vadimgrn/usbip-win2/releases and try again.
+err-vboxusb-missing = The VirtualBox USB drivers needed for sharing are not installed. Reinstall USB Nexus.
 err-unreachable = The computer could not be reached. Check that it is on and connected to the network.
 err-permission-denied = USB Nexus does not have the permissions it needs.
 err-invalid = The request was not understood.

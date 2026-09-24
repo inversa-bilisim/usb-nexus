@@ -25,6 +25,9 @@ pub struct LocalDevice {
     pub driver: Option<String>,
 }
 
+/// A boxed, sendable future (object-safe async trait methods).
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 /// Server side: shares local devices.
 pub trait ExportBackend: Send + Sync + 'static {
     /// Devices this server offers.
@@ -32,7 +35,7 @@ pub trait ExportBackend: Send + Sync + 'static {
 
     /// Hands `busid` to the USB/IP stack and returns the socket that carries
     /// its URB traffic. Dropping the socket ends the export.
-    fn export(&self, busid: &str) -> Result<tokio::net::TcpStream>;
+    fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>>;
 }
 
 /// Access to all USB devices of this machine (the OS side of exporting).
@@ -41,7 +44,7 @@ pub trait DeviceHost: Send + Sync + 'static {
     fn list_all(&self) -> Result<Vec<LocalDevice>>;
 
     /// Hands `busid` to the USB/IP stack; see [`ExportBackend::export`].
-    fn export(&self, busid: &str) -> Result<tokio::net::TcpStream>;
+    fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>>;
 
     /// Returns `busid` to its normal driver after sharing ends.
     fn release(&self, busid: &str) -> Result<()>;
@@ -95,9 +98,9 @@ impl ExportBackend for SharedExport {
         Ok(self.host.list_all()?.into_iter().filter(|d| shared.contains(&d.info.busid)).collect())
     }
 
-    fn export(&self, busid: &str) -> Result<tokio::net::TcpStream> {
+    fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
         if !self.is_shared(busid) {
-            anyhow::bail!("{busid} is not shared");
+            return Box::pin(async move { anyhow::bail!("{busid} is not shared") });
         }
         self.host.export(busid)
     }
@@ -112,17 +115,14 @@ impl DeviceHost for UnsupportedHost {
         Err(crate::api::ApiError::new("unsupported", "sharing devices is not supported on this platform yet").into())
     }
 
-    fn export(&self, _busid: &str) -> Result<tokio::net::TcpStream> {
-        self.list_all().map(|_| unreachable!())
+    fn export<'a>(&'a self, _busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
+        Box::pin(async move { self.list_all().map(|_| unreachable!()) })
     }
 
     fn release(&self, _busid: &str) -> Result<()> {
         Ok(())
     }
 }
-
-/// A boxed, sendable future (object-safe async trait methods).
-pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// Client side: attaches remote devices to a virtual host controller.
 pub trait ImportBackend: Send + Sync + 'static {
@@ -220,21 +220,23 @@ pub mod demo {
             ])
         }
 
-        fn export(&self, busid: &str) -> Result<tokio::net::TcpStream> {
-            if !self.list_all()?.iter().any(|d| d.info.busid == busid) {
-                bail!("no USB device {busid}");
-            }
-            let (ours, kernel) = loopback_pair()?;
-            let mut kernel = into_tokio(kernel)?;
-            tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                while let Ok(n) = kernel.read(&mut buf).await {
-                    if n == 0 || kernel.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
+        fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
+            Box::pin(async move {
+                if !self.list_all()?.iter().any(|d| d.info.busid == busid) {
+                    bail!("no USB device {busid}");
                 }
-            });
-            Ok(into_tokio(ours)?)
+                let (ours, kernel) = loopback_pair()?;
+                let mut kernel = into_tokio(kernel)?;
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = kernel.read(&mut buf).await {
+                        if n == 0 || kernel.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                Ok(into_tokio(ours)?)
+            })
         }
 
         fn release(&self, _busid: &str) -> Result<()> {

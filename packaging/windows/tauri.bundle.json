@@ -1,15 +1,25 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["nsis"],
-    "externalBin": ["binaries/usbnexus"],
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/usbnexus"
+    ],
     "windows": {
       "nsis": {
         "installMode": "perMachine",
-        "languages": ["English", "Turkish"],
+        "languages": [
+          "English",
+          "Turkish"
+        ],
         "displayLanguageSelector": true,
         "installerHooks": "../../../packaging/windows/hooks.nsh"
       }
+    },
+    "resources": {
+      "../../../packaging/windows/drivers/": "drivers/"
     }
   }
 }

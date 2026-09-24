@@ -11,7 +11,7 @@ use std::ffi::{OsStr, OsString};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use usbnexus_i18n::t;
 use windows_service::service::{
     ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo,
@@ -30,6 +30,82 @@ const FIREWALL_RULE: &str = "USB Nexus";
 
 /// Context handed from `main` to the service entry point.
 static CONTEXT: OnceLock<Ctx> = OnceLock::new();
+
+/// Kernel service of the VirtualBox USB capture monitor.
+const MONITOR_SERVICE: &str = "VBoxUSBMon";
+
+/// Bundled VBoxUSB drivers for this CPU: `<exe dir>\drivers\<arch>`.
+fn driver_dir() -> Option<std::path::PathBuf> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ => return None,
+    };
+    let dir = std::env::current_exe().ok()?.parent()?.join("drivers").join(arch);
+    dir.join("VBoxUSBMon.sys").is_file().then_some(dir)
+}
+
+/// Adds VBoxUSB to the driver store and registers the VBoxUSBMon kernel
+/// service, unless another program (e.g. usbipd-win) already did.
+fn install_drivers(manager: &ServiceManager) -> Result<()> {
+    let Some(dir) = driver_dir() else {
+        tracing::warn!("bundled VBoxUSB drivers not found; sharing local devices will be unavailable");
+        return Ok(());
+    };
+    let inf = dir.join("VBoxUSB.inf");
+    let out = std::process::Command::new("pnputil").arg("/add-driver").arg(&inf).output().context("running pnputil")?;
+    if !out.status.success() {
+        bail!("pnputil /add-driver failed: {}", String::from_utf8_lossy(&out.stdout).trim());
+    }
+    if manager.open_service(MONITOR_SERVICE, ServiceAccess::QUERY_STATUS).is_ok() {
+        return Ok(());
+    }
+    let info = ServiceInfo {
+        name: OsString::from(MONITOR_SERVICE),
+        display_name: OsString::from("VirtualBox USB Monitor Service"),
+        service_type: ServiceType::KERNEL_DRIVER,
+        start_type: ServiceStartType::OnDemand,
+        error_control: ServiceErrorControl::Normal,
+        executable_path: dir.join("VBoxUSBMon.sys"),
+        launch_arguments: vec![],
+        dependencies: vec![],
+        account_name: None,
+        account_password: None,
+    };
+    manager.create_service(&info, ServiceAccess::QUERY_STATUS).context("registering VBoxUSBMon")?;
+    Ok(())
+}
+
+/// Removes the VBoxUSBMon service if it is the one we registered.
+fn uninstall_drivers(manager: &ServiceManager) {
+    let Some(dir) = driver_dir() else { return };
+    let Ok(service) = manager.open_service(
+        MONITOR_SERVICE,
+        ServiceAccess::QUERY_CONFIG | ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
+    ) else {
+        return;
+    };
+    let ours = service
+        .query_config()
+        .map(|c| c.executable_path.to_string_lossy().to_lowercase().contains(&dir.to_string_lossy().to_lowercase()))
+        .unwrap_or(false);
+    if ours {
+        let _ = service.stop();
+        let _ = service.delete();
+    }
+}
+
+/// Starts the capture monitor so devices can be shared (best effort).
+fn start_monitor() {
+    let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else { return };
+    if let Ok(service) = manager.open_service(MONITOR_SERVICE, ServiceAccess::QUERY_STATUS | ServiceAccess::START) {
+        if service.query_status().map(|s| s.current_state != ServiceState::Running).unwrap_or(false) {
+            if let Err(e) = service.start(&[] as &[&OsStr]) {
+                tracing::warn!("could not start VBoxUSBMon: {e}");
+            }
+        }
+    }
+}
 
 pub fn install() -> Result<()> {
     let exe = std::env::current_exe()?;
@@ -50,6 +126,7 @@ pub fn install() -> Result<()> {
         account_name: None, // LocalSystem
         account_password: None,
     };
+    install_drivers(&manager)?;
     let service = manager
         .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
         .context("creating the service")?;
@@ -91,6 +168,7 @@ pub fn uninstall() -> Result<()> {
         }
     }
     service.delete().context("deleting the service")?;
+    uninstall_drivers(&manager);
     let _ = std::process::Command::new("netsh")
         .args(["advfirewall", "firewall", "delete", "rule", &format!("name={FIREWALL_RULE}")])
         .output();
@@ -141,6 +219,7 @@ fn run_service() -> Result<()> {
     })?;
     handle.set_service_status(status(ServiceState::StartPending, 0))?;
 
+    start_monitor();
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(async {
         let mut stop_rx = stop_rx;

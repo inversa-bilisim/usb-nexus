@@ -46,21 +46,23 @@ impl ExportBackend for MockExport {
         Ok(vec![LocalDevice { info: device(), product: Some("Mock".into()), manufacturer: None, driver: None }])
     }
 
-    fn export(&self, _busid: &str) -> Result<TcpStream> {
-        let (ours, kernel) = loopback_pair()?;
-        let mut kernel = into_tokio(kernel)?;
-        tokio::spawn(async move {
-            let mut buf = [0u8; 1024];
-            while let Ok(n) = kernel.read(&mut buf).await {
-                if n == 0 || &buf[..n] == b"bye" {
-                    break;
+    fn export<'a>(&'a self, _busid: &'a str) -> BoxFuture<'a, Result<TcpStream>> {
+        Box::pin(async move {
+            let (ours, kernel) = loopback_pair()?;
+            let mut kernel = into_tokio(kernel)?;
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = kernel.read(&mut buf).await {
+                    if n == 0 || &buf[..n] == b"bye" {
+                        break;
+                    }
+                    if kernel.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
                 }
-                if kernel.write_all(&buf[..n]).await.is_err() {
-                    break;
-                }
-            }
-        });
-        Ok(into_tokio(ours)?)
+            });
+            Ok(into_tokio(ours)?)
+        })
     }
 }
 

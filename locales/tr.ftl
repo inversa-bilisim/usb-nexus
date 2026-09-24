@@ -122,6 +122,7 @@ err-protocol = Sunucudan beklenmeyen yanıt alındı.
 err-connection-lost = Bilgisayarla bağlantı koptu.
 err-unsupported = Bu özellik bu işletim sisteminde henüz kullanılamıyor.
 err-driver-missing = usbip-win2 sürücüsü kurulu değil. github.com/vadimgrn/usbip-win2/releases adresinden kurup yeniden deneyin.
+err-vboxusb-missing = Paylaşım için gereken VirtualBox USB sürücüleri kurulu değil. USB Nexus'u yeniden kurun.
 err-unreachable = Bilgisayara ulaşılamadı. Açık ve ağa bağlı olduğundan emin olun.
 err-permission-denied = USB Nexus gerekli izinlere sahip değil.
 err-invalid = İstek anlaşılamadı.

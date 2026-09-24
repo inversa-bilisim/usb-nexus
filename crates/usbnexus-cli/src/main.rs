@@ -324,10 +324,9 @@ fn backends(
     }
     #[cfg(windows)]
     {
-        // Sharing devices from Windows (VBoxUSB) is not implemented yet.
-        use usbnexus_core::backend::UnsupportedHost;
         use usbnexus_core::windows::WindowsImport;
-        Ok((Arc::new(UnsupportedHost), Arc::new(WindowsImport::default())))
+        use usbnexus_core::windows_host::WindowsHost;
+        Ok((Arc::new(WindowsHost), Arc::new(WindowsImport::default())))
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
@@ -480,9 +479,15 @@ async fn pin(ctx: &Ctx, seconds: u64) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn local() -> Result<()> {
+    #[cfg(target_os = "linux")]
     let devices = usbnexus_core::linux::list_local(Path::new("/sys"))?;
+    #[cfg(windows)]
+    let devices = {
+        use usbnexus_core::backend::DeviceHost;
+        usbnexus_core::windows_host::WindowsHost.list_all()?
+    };
     if devices.is_empty() {
         println!("{}", t!("local-empty"));
         return Ok(());
@@ -504,7 +509,7 @@ fn local() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn local() -> Result<()> {
     bail!(t!("unsupported-os"))
 }

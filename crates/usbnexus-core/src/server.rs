@@ -302,11 +302,16 @@ where
     }
     let _guard = InUse { set: &inner.in_use, busid: busid.to_string() };
 
-    let local = match inner.backend.export(busid) {
+    let local = match inner.backend.export(busid).await {
         Ok(s) => s,
         Err(e) => {
             warn!(busid, "export failed: {e:#}");
-            return send_error(&mut tls, ErrorCode::Internal, format!("could not export {busid}")).await;
+            let code = match e.downcast_ref::<crate::api::ApiError>().map(|a| a.code.as_str()) {
+                Some("device_busy") => ErrorCode::DeviceBusy,
+                Some("no_such_device") => ErrorCode::NoSuchDevice,
+                _ => ErrorCode::Internal,
+            };
+            return send_error(&mut tls, code, format!("could not export {busid}")).await;
         }
     };
     write_frame(&mut tls, &ServerMsg::Imported { device: device.info }).await?;

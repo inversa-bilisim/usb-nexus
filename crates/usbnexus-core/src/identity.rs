@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
-//! Long-term identity of a Demli node: a self-signed certificate and its key.
+//! Long-term identity of a USB Nexus node: a self-signed certificate and its key.
 //!
 //! Certificates are not validated against a CA. A peer is identified by the
 //! SHA-256 fingerprint of its certificate, which is pinned during pairing.
@@ -42,7 +42,7 @@ impl Identity {
     /// Generates a fresh identity.
     pub fn generate(name: &str) -> Result<Self> {
         let key = rcgen::KeyPair::generate().context("generating key pair")?;
-        let mut params = rcgen::CertificateParams::new(vec!["demli.invalid".to_string()])
+        let mut params = rcgen::CertificateParams::new(vec!["usbnexus.invalid".to_string()])
             .context("building certificate parameters")?;
         params.distinguished_name.push(rcgen::DnType::CommonName, name);
         let cert = params.self_signed(&key).context("self-signing certificate")?;

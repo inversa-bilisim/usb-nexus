@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
-//! LAN discovery of Demli servers via mDNS / DNS-SD.
+//! LAN discovery of USB Nexus servers via mDNS / DNS-SD.
 //!
-//! Servers advertise `_demli._tcp.local.` with their certificate fingerprint
+//! Servers advertise `_usbnexus._tcp.local.` with their certificate fingerprint
 //! in the TXT record. Discovery only finds candidates: trust is always
 //! established by the TLS fingerprint check, never by mDNS data.
 
@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
-pub const SERVICE_TYPE: &str = "_demli._tcp.local.";
+pub const SERVICE_TYPE: &str = "_usbnexus._tcp.local.";
 
 /// Keeps a service registered while alive.
 pub struct Advertiser {
@@ -35,7 +35,7 @@ fn label(name: &str) -> String {
         name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).take(40).collect();
     let s = s.trim_matches('-').to_string();
     if s.is_empty() {
-        "demli".into()
+        "usbnexus".into()
     } else {
         s
     }
@@ -119,6 +119,6 @@ mod tests {
     #[test]
     fn labels() {
         assert_eq!(label("Ofis PC (1)"), "Ofis-PC--1");
-        assert_eq!(label("***"), "demli");
+        assert_eq!(label("***"), "usbnexus");
     }
 }

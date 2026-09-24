@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
 //! End-to-end tests of server and client over real TCP + TLS, with mock
 //! backends standing in for the kernel USB/IP drivers.
@@ -8,13 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use demli_core::backend::{into_tokio, loopback_pair, ExportBackend, ImportBackend, LocalDevice};
-use demli_core::client::{self, AttachEvent, ClientConfig, ClientError, Target};
-use demli_core::control::{ErrorCode, RemoteError};
-use demli_core::identity::Identity;
-use demli_core::server::{Server, ServerConfig};
-use demli_core::trust::TrustStore;
-use demli_proto::{DeviceInfo, Speed};
+use usbnexus_core::backend::{into_tokio, loopback_pair, ExportBackend, ImportBackend, LocalDevice};
+use usbnexus_core::client::{self, AttachEvent, ClientConfig, ClientError, Target};
+use usbnexus_core::control::{ErrorCode, RemoteError};
+use usbnexus_core::identity::Identity;
+use usbnexus_core::server::{Server, ServerConfig};
+use usbnexus_core::trust::TrustStore;
+use usbnexus_proto::{DeviceInfo, Speed};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -160,7 +160,7 @@ async fn pairing_flow() {
 async fn pairing_window_closes_after_repeated_failures() {
     let f = start().await;
     f.server.open_pairing_with_pin("111111", Duration::from_secs(60));
-    for _ in 0..demli_core::pairing::MAX_ATTEMPTS {
+    for _ in 0..usbnexus_core::pairing::MAX_ATTEMPTS {
         let e = client::connect(&f.client, &f.addr, Some("999999")).await.err().unwrap();
         assert_eq!(remote_code(&e), Some(ErrorCode::PairingFailed));
     }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
-//! Demli server: authenticates clients and exports local USB devices.
+//! USB Nexus server: authenticates clients and exports local USB devices.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;

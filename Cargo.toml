@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/demli-proto", "crates/demli-core", "crates/demli-cli"]
+members = ["crates/usbnexus-proto", "crates/usbnexus-core", "crates/usbnexus-cli", "crates/usbnexus-i18n"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,8 +10,11 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/lippton/demli"
 
 [workspace.dependencies]
-demli-proto = { path = "crates/demli-proto" }
-demli-core = { path = "crates/demli-core" }
+usbnexus-proto = { path = "crates/usbnexus-proto" }
+usbnexus-core = { path = "crates/usbnexus-core" }
+usbnexus-i18n = { path = "crates/usbnexus-i18n" }
+fluent-bundle = "0.16"
+unic-langid = "0.9"
 anyhow = "1"
 thiserror = "2"
 bytes = "1"

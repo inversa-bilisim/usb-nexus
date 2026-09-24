@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
-//! Demli client: connects to servers, pairs, lists and attaches devices.
+//! USB Nexus client: connects to servers, pairs, lists and attaches devices.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use demli_proto::DeviceInfo;
+use usbnexus_proto::DeviceInfo;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::client::TlsStream;

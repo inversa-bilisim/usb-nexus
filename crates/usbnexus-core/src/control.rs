@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
 //! Control protocol spoken inside the TLS tunnel before the URB phase.
 //!
@@ -13,7 +13,7 @@
 //!   Import ──▶ ◀── Imported                  after this the stream carries raw USB/IP URBs
 //! ```
 
-use demli_proto::DeviceInfo;
+use usbnexus_proto::DeviceInfo;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

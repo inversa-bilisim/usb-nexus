@@ -1,5 +1,5 @@
 [package]
-name = "demli-proto"
+name = "usbnexus-proto"
 description = "USB/IP wire protocol encoding and decoding"
 version.workspace = true
 edition.workspace = true

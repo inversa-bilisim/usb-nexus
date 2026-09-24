@@ -1,6 +1,6 @@
 [package]
-name = "demli-cli"
-description = "Demli command line tool and daemon"
+name = "usbnexus-cli"
+description = "USB Nexus command line tool and daemon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +8,13 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "demli"
+name = "usbnexus"
 path = "src/main.rs"
 
 [dependencies]
-demli-core.workspace = true
-demli-proto.workspace = true
+usbnexus-core.workspace = true
+usbnexus-proto.workspace = true
+usbnexus-i18n.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 clap.workspace = true

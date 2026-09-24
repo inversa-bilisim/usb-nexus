@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
 //! Linux backends driving the in-kernel USB/IP drivers through sysfs.
 //!
@@ -16,7 +16,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use demli_proto::{DeviceInfo, InterfaceInfo, Speed};
+use usbnexus_proto::{DeviceInfo, InterfaceInfo, Speed};
 
 use crate::backend::{into_tokio, loopback_pair, ExportBackend, ImportBackend, LocalDevice};
 

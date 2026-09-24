@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
 //! PIN pairing.
 //!
@@ -19,8 +19,8 @@ use sha2::Sha256;
 use spake2::{Ed25519Group, Identity as SpakeId, Password, Spake2};
 use subtle::ConstantTimeEq;
 
-const ID_CLIENT: &[u8] = b"demli-client";
-const ID_SERVER: &[u8] = b"demli-server";
+const ID_CLIENT: &[u8] = b"usbnexus-client";
+const ID_SERVER: &[u8] = b"usbnexus-server";
 
 /// Number of digits in a pairing PIN.
 pub const PIN_DIGITS: usize = 6;
@@ -82,8 +82,8 @@ impl Confirm {
     fn mac_for(&self, role: Role) -> Vec<u8> {
         let mut m = <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC accepts any key length");
         m.update(match role {
-            Role::Client => b"demli-confirm-client",
-            Role::Server => b"demli-confirm-server",
+            Role::Client => b"usbnexus-confirm-client",
+            Role::Server => b"usbnexus-confirm-server",
         });
         m.update(&self.binding);
         m.finalize().into_bytes().to_vec()

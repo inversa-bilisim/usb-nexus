@@ -1,0 +1,15 @@
+[package]
+name = "usbnexus-i18n"
+description = "USB Nexus user interface translations (Fluent)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fluent-bundle.workspace = true
+unic-langid.workspace = true
+
+[dev-dependencies]
+fluent-syntax = "0.12"

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
 //! TLS 1.3 configuration with mutual authentication.
 //!
@@ -21,7 +21,7 @@ use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use crate::identity::Identity;
 
 /// Label for TLS exporter keying material used to bind pairing to the session.
-pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-demli-pairing-v1";
+pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-usbnexus-pairing-v1";
 
 fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
@@ -147,7 +147,7 @@ pub fn client_config(id: &Identity) -> Result<Arc<rustls::ClientConfig>> {
 
 /// Server name sent in SNI. Certificates are pinned, so it is not checked.
 pub fn server_name() -> ServerName<'static> {
-    ServerName::try_from("demli.invalid").expect("static name is valid")
+    ServerName::try_from("usbnexus.invalid").expect("static name is valid")
 }
 
 /// Extracts the peer fingerprint from an established connection.

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
-//! Demli core library.
+//! USB Nexus core library.
 //!
-//! Demli carries standard USB/IP traffic inside a mutually authenticated
+//! USB Nexus carries standard USB/IP traffic inside a mutually authenticated
 //! TLS 1.3 tunnel. The kernel (or, on Windows, a signed USB/IP driver) keeps
 //! speaking plain USB/IP to a loopback socket owned by this library, which
 //! relays the bytes to the peer over TLS. On top of that the library adds:
@@ -29,9 +29,9 @@ pub mod trust;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
-/// Default TCP port of the Demli service. The plain USB/IP port (3240) is
-/// left free so Demli can coexist with the stock `usbipd`.
+/// Default TCP port of the USB Nexus service. The plain USB/IP port (3240) is
+/// left free so USB Nexus can coexist with the stock `usbipd`.
 pub const DEFAULT_PORT: u16 = 3241;
 
-/// Version of the Demli control protocol.
+/// Version of the USB Nexus control protocol.
 pub const CONTROL_VERSION: u32 = 1;

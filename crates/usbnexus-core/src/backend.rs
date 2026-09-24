@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 Demli contributors
+// Copyright (C) 2026 USB Nexus contributors
 
 //! Platform backends.
 //!
-//! A backend connects Demli to the operating system's USB/IP implementation.
+//! A backend connects USB Nexus to the operating system's USB/IP implementation.
 //! It never parses URBs itself: it hands one end of a loopback TCP socket to
-//! the OS stack and returns the other end, which Demli relays over TLS.
+//! the OS stack and returns the other end, which USB Nexus relays over TLS.
 
 use std::io;
 use std::net::{TcpListener, TcpStream};
 
 use anyhow::Result;
-use demli_proto::DeviceInfo;
+use usbnexus_proto::DeviceInfo;
 
 /// A local USB device that can be exported.
 #[derive(Debug, Clone, PartialEq, Eq)]

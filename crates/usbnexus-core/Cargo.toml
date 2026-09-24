@@ -1,6 +1,6 @@
 [package]
-name = "demli-core"
-description = "Demli core: secure transport, pairing, discovery, reconnect and device backends"
+name = "usbnexus-core"
+description = "USB Nexus core: secure transport, pairing, discovery, reconnect and device backends"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-demli-proto = { workspace = true, features = ["serde"] }
+usbnexus-proto = { workspace = true, features = ["serde"] }
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

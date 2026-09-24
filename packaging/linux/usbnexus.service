@@ -3,7 +3,7 @@
 
 [Unit]
 Description=USB Nexus - secure USB over IP
-Documentation=https://github.com/lippton/demli
+Documentation=https://github.com/inversa-bilisim/usb-nexus
 After=network-online.target
 Wants=network-online.target
 

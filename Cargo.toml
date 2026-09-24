@@ -13,7 +13,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/lippton/demli"
+repository = "https://github.com/inversa-bilisim/usb-nexus"
 
 [workspace.dependencies]
 usbnexus-proto = { path = "crates/usbnexus-proto" }

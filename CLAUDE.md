@@ -3,8 +3,8 @@
 USB Nexus is a GPL-3.0-or-later, clean-room USB-over-IP product (Rust). It
 carries standard USB/IP inside mutually authenticated TLS 1.3, with PIN
 pairing, mDNS discovery, automatic reconnection, a desktop app, a web UI and
-installers. The GitHub repository is still `lippton/demli`; it will move to the
-owner's company account later (only `Cargo.toml` `repository` needs changing).
+installers. The GitHub repository is `inversa-bilisim/usb-nexus` (moved from
+`lippton/demli`, which is no longer used).
 
 ## Ground rules (from the project owner)
 

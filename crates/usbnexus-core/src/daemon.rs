@@ -205,13 +205,13 @@ impl Daemon {
                         AttachState::Attached { port }
                     }
                     AttachEvent::Retrying { delay } => {
-                        let reason = match &*st.lock().unwrap() {
-                            AttachState::Retrying { reason, .. } => reason.clone(),
-                            _ => String::new(),
+                        let error = match &*st.lock().unwrap() {
+                            AttachState::Retrying { error, .. } => error.clone(),
+                            _ => ApiError::new("connection_lost", ""),
                         };
-                        AttachState::Retrying { seconds: delay.as_secs_f64().ceil() as u64, reason }
+                        AttachState::Retrying { seconds: delay.as_secs_f64().ceil() as u64, error }
                     }
-                    AttachEvent::Disconnected { reason } => AttachState::Retrying { seconds: 0, reason },
+                    AttachEvent::Disconnected { error } => AttachState::Retrying { seconds: 0, error },
                     AttachEvent::Detached => AttachState::Stopped,
                 };
                 *st.lock().unwrap() = next;

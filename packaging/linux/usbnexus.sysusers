@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Members of this group may control the USB Nexus service from the desktop app.
+# Install to /usr/lib/sysusers.d/usbnexus.conf
+g usbnexus -

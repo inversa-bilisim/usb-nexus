@@ -100,6 +100,51 @@ impl Localizer {
     }
 }
 
+/// Converts a simple Fluent pattern to a template with `{name}` placeholders.
+/// Only text and variable references are supported, which is all the UI uses.
+fn pattern_template(p: &fluent_syntax::ast::Pattern<&str>) -> String {
+    use fluent_syntax::ast::{Expression, InlineExpression, PatternElement};
+    let mut out = String::new();
+    for el in &p.elements {
+        match el {
+            PatternElement::TextElement { value } => out.push_str(value),
+            PatternElement::Placeable {
+                expression: Expression::Inline(InlineExpression::VariableReference { id }),
+            } => {
+                out.push('{');
+                out.push_str(id.name);
+                out.push('}');
+            }
+            PatternElement::Placeable { .. } => {}
+        }
+    }
+    out
+}
+
+/// All messages of a language as `{name}` templates, with English filling
+/// any gaps. Used by the graphical interface.
+pub fn templates(code: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let chosen = source(code).map(|(c, _)| c).unwrap_or(FALLBACK);
+    for c in [FALLBACK, chosen] {
+        let (_, src) = source(c).expect("known locale");
+        let res = fluent_syntax::parser::parse(src).unwrap_or_else(|(r, _)| r);
+        for entry in &res.body {
+            if let fluent_syntax::ast::Entry::Message(m) = entry {
+                if let Some(v) = &m.value {
+                    out.insert(m.id.name.to_string(), pattern_template(v));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Supported languages as `(code, native name)`.
+pub fn languages() -> Vec<(&'static str, &'static str)> {
+    LOCALES.iter().map(|(c, n, _)| (*c, *n)).collect()
+}
+
 static GLOBAL: OnceLock<Localizer> = OnceLock::new();
 
 /// Sets the process-wide language. Only the first call has an effect.
@@ -174,6 +219,14 @@ mod tests {
         let en = Localizer::new("en");
         assert_eq!(en.format("attach-retrying", Some(&args(&[("seconds", 3.into())]))), "Reconnecting in 3 seconds…");
         assert_eq!(en.format("no-such-message", None), "no-such-message");
+    }
+
+    #[test]
+    fn templates_for_ui() {
+        let t = templates("tr");
+        assert_eq!(t["pin-show"], "Eşleştirme PIN kodu: {pin}");
+        assert_eq!(templates("xx")["pin-show"], "Pairing PIN: {pin}");
+        assert_eq!(t.len(), templates("en").len());
     }
 
     #[test]

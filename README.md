@@ -15,7 +15,9 @@ Hedefler:
 | `crates/usbnexus-proto` | USB/IP kablo protokolü (spesifikasyondan sıfırdan yazıldı) |
 | `crates/usbnexus-core` | TLS tüneli, PIN ile eşleştirme, mDNS ile bulma, otomatik yeniden bağlanma, Linux arka uçları |
 | `crates/usbnexus-i18n` | Arayüz çevirileri ([Fluent](https://projectfluent.org/)) |
-| `crates/usbnexus-cli` | `usbnexus` komut satırı aracı ve servis (yapım aşamasında) |
+| `crates/usbnexus-cli` | `usbnexus` komut satırı aracı ve servis |
+| `apps/desktop` | Masaüstü uygulaması (Tauri 2; arayüz `apps/desktop/ui`) |
+| `packaging/linux` | systemd servisi ve elle kurulum notları |
 | `locales/` | Çeviri dosyaları: `en.ftl`, `tr.ftl` |
 
 ## Diller
@@ -25,10 +27,37 @@ Arayüz şu an **Türkçe** ve **İngilizce** destekliyor. Dil, sistem ayarında
 ve `crates/usbnexus-i18n/src/lib.rs` içindeki `LOCALES` listesine ekleyin. Eksik çeviri olursa testler
 başarısız olur.
 
-## Derleme
+## Masaüstü uygulaması
+
+<p align="center"><img src="docs/screenshots/this.png" width="720" alt="Bu bilgisayardaki cihazlar"></p>
+
+| | |
+|---|---|
+| <img src="docs/screenshots/remote.png" width="400" alt="Uzak cihazlar"> | <img src="docs/screenshots/pin.png" width="400" alt="Eşleştirme PIN kodu"> |
+
+Uygulama yetkisiz bir kullanıcı olarak çalışır ve tüm işleri arka plandaki **USB Nexus hizmetine**
+(`usbnexus daemon`) yaptırır. Pencere kapatılsa bile paylaşımlar ve bağlantılar sürer; hizmet yeniden
+başladığında kayıtlı bağlantılar kendiliğinden geri kurulur. Kurulum: [packaging/linux](packaging/linux/README.md).
+
+Donanım olmadan denemek için (demo cihazlarla):
 
 ```sh
-cargo build --release      # çıktı: target/release/usbnexus
+cargo build -p usbnexus-cli -p usbnexus-desktop
+export USBNEXUS_SOCKET=/tmp/usbnexus-demo.sock
+target/debug/usbnexus daemon --demo --state-dir /tmp/usbnexus-demo --socket $USBNEXUS_SOCKET &
+target/debug/usbnexus-desktop
+```
+
+## Derleme
+
+Linux'ta masaüstü uygulaması için önce sistem kütüphaneleri gerekir:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+```
+
+```sh
+cargo build --release      # çıktılar: target/release/usbnexus, target/release/usbnexus-desktop
 cargo test --workspace
 ```
 
@@ -62,7 +91,8 @@ yeniden bulur.
 | Linux sunucu ↔ Linux istemci | Çekirdekteki `usbip-host` / `vhci-hcd` | Çalışıyor (donanım testi bekliyor) |
 | Windows sunucu | VBoxUSB (Oracle, Microsoft imzalı, GPL-3.0) | Planlandı |
 | Windows istemci | usbip-win2 (attestation imzalı, BSD-2) | Planlandı |
-| Grafik arayüz | Tauri, aynı `locales/` çevirileri | Planlandı |
+| Grafik arayüz (Linux) | Tauri, aynı `locales/` çevirileri | Çalışıyor (demo ile test edildi) |
+| Grafik arayüz (Windows/macOS) | Hizmet için adlandırılmış kanal / yerel soket | Planlandı |
 
 ## Lisans
 

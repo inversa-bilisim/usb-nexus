@@ -235,8 +235,9 @@ pub enum AttachEvent {
         port: u32,
         device: DeviceInfo,
     },
+    /// The connection failed or dropped; `error.code` says why.
     Disconnected {
-        reason: String,
+        error: crate::api::ApiError,
     },
     Retrying {
         delay: Duration,
@@ -280,7 +281,7 @@ pub async fn attach_forever(
             Err(e) if is_permanent(&e) => return Err(e),
             Err(e) => {
                 warn!("attach attempt failed: {e:#}");
-                events(AttachEvent::Disconnected { reason: format!("{e:#}") });
+                events(AttachEvent::Disconnected { error: crate::api::ApiError::from_anyhow(&e) });
                 let delay = backoff.next_delay();
                 events(AttachEvent::Retrying { delay });
                 tokio::time::sleep(delay).await;
@@ -302,7 +303,7 @@ pub async fn attach_forever(
                 // an explicit detach is a best-effort cleanup.
                 let _ = backend.detach(port);
                 let reason = err.map(|e| e.to_string()).unwrap_or_else(|| "connection closed".into());
-                events(AttachEvent::Disconnected { reason });
+                events(AttachEvent::Disconnected { error: crate::api::ApiError::new("connection_lost", reason) });
                 let delay = backoff.next_delay();
                 events(AttachEvent::Retrying { delay });
                 tokio::time::sleep(delay).await;

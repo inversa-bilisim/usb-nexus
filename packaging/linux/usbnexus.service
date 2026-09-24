@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# USB Nexus service. Install to /usr/lib/systemd/system/usbnexus.service.
+
+[Unit]
+Description=USB Nexus - secure USB over IP
+Documentation=https://github.com/lippton/demli
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/sbin/modprobe usbip-host
+ExecStartPre=-/usr/sbin/modprobe vhci-hcd
+ExecStart=/usr/bin/usbnexus daemon
+Restart=on-failure
+RestartSec=3
+# Keys, paired computers and settings.
+StateDirectory=usbnexus
+StateDirectoryMode=0700
+# Control socket for the desktop app and CLI.
+RuntimeDirectory=usbnexus
+RuntimeDirectoryMode=0755
+# Hardening: the service needs root for sysfs, but nothing else.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

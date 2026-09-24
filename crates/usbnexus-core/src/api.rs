@@ -167,9 +167,10 @@ pub enum AttachState {
     Attached {
         port: u32,
     },
+    /// Waiting `seconds` before the next attempt; `error` says what failed.
     Retrying {
         seconds: u64,
-        reason: String,
+        error: ApiError,
     },
     /// Detached on this computer (device removed or detached by the OS).
     Stopped,

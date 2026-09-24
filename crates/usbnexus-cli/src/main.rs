@@ -508,7 +508,10 @@ async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
             println!("{}", t!("attach-attached", busid = busid, port = port));
             println!("{}", t!("attach-stop-hint"));
         }
-        AttachEvent::Disconnected { reason } => println!("{}", t!("attach-disconnected", reason = reason)),
+        AttachEvent::Disconnected { error } => {
+            let reason = ui::describe(&error.clone().into(), None);
+            println!("{}", t!("attach-disconnected", reason = reason));
+        }
         AttachEvent::Retrying { delay } => println!("{}", t!("attach-retrying", seconds = delay.as_secs_f64().ceil())),
         AttachEvent::Detached => println!("{}", t!("attach-detached")),
     };

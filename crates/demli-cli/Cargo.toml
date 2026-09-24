@@ -1,0 +1,23 @@
+[package]
+name = "demli-cli"
+description = "Demli command line tool and daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "demli"
+path = "src/main.rs"
+
+[dependencies]
+demli-core.workspace = true
+demli-proto.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+directories.workspace = true
+serde_json.workspace = true

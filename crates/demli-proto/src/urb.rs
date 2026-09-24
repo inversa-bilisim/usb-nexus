@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Demli contributors
+
 //! URB phase messages (`USBIP_CMD_SUBMIT`, `USBIP_RET_SUBMIT`,
 //! `USBIP_CMD_UNLINK`, `USBIP_RET_UNLINK`).
 

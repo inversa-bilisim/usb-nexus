@@ -24,4 +24,8 @@ cargo test --workspace
 
 ## Lisans
 
-Telif hakkı © Demli geliştiricileri. Tüm hakları saklıdır. Lisans modeli henüz belirlenmedi.
+Demli özgür yazılımdır: [GNU Genel Kamu Lisansı sürüm 3](LICENSE) veya (tercihinize göre) daha sonraki
+bir sürümün koşulları altında yeniden dağıtabilir ve/veya değiştirebilirsiniz (`GPL-3.0-or-later`).
+
+Demli is free software, licensed under the GNU General Public License v3.0 or later.
+See [LICENSE](LICENSE).

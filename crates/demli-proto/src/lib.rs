@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Demli contributors
+
 //! USB/IP wire protocol.
 //!
 //! Clean-room implementation of the message formats described in the public

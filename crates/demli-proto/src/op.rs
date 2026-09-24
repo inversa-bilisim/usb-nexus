@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Demli contributors
+
 //! Operation phase messages (device list and import).
 
 use bytes::{Buf, BufMut};

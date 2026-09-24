@@ -6,8 +6,8 @@ members = ["crates/demli-proto", "crates/demli-core", "crates/demli-cli"]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-license = "LicenseRef-Proprietary"
-publish = false
+license = "GPL-3.0-or-later"
+repository = "https://github.com/lippton/demli"
 
 [workspace.dependencies]
 demli-proto = { path = "crates/demli-proto" }

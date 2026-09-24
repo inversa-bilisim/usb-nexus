@@ -113,3 +113,17 @@ err-no-such-device = The server does not share this device.
 err-device-busy = The device is being used by another computer.
 err-internal = The server reported an internal error.
 err-protocol = Unexpected response from the server.
+
+## Help layout
+
+help-usage = Usage:
+help-arguments = Arguments
+help-options = Options
+help-commands = Commands
+arg-help = Show help.
+arg-version = Show version.
+
+## Peers
+
+peers-servers = Paired servers (this computer can use their devices):
+peers-clients = Paired clients (allowed to use this computer's devices):

@@ -110,3 +110,17 @@ err-no-such-device = Sunucu bu cihazı paylaşmıyor.
 err-device-busy = Cihaz başka bir bilgisayar tarafından kullanılıyor.
 err-internal = Sunucu bir iç hata bildirdi.
 err-protocol = Sunucudan beklenmeyen yanıt alındı.
+
+## Help layout
+
+help-usage = Kullanım:
+help-arguments = Argümanlar
+help-options = Seçenekler
+help-commands = Komutlar
+arg-help = Yardımı göster.
+arg-version = Sürümü göster.
+
+## Peers
+
+peers-servers = Eşleştirilmiş sunucular (bu bilgisayar onların cihazlarını kullanabilir):
+peers-clients = Eşleştirilmiş istemciler (bu bilgisayarın cihazlarını kullanabilir):

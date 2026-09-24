@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use usbnexus_core::backend::{into_tokio, loopback_pair, ExportBackend, ImportBackend, LocalDevice};
 use usbnexus_core::client::{self, AttachEvent, ClientConfig, ClientError, Target};
 use usbnexus_core::control::{ErrorCode, RemoteError};
@@ -15,9 +18,6 @@ use usbnexus_core::identity::Identity;
 use usbnexus_core::server::{Server, ServerConfig};
 use usbnexus_core::trust::TrustStore;
 use usbnexus_proto::{DeviceInfo, Speed};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
 
 fn device() -> DeviceInfo {
     DeviceInfo {

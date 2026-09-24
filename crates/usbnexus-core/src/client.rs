@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use usbnexus_proto::DeviceInfo;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info, warn};
+use usbnexus_proto::DeviceInfo;
 
 use crate::backend::ImportBackend;
 use crate::backoff::Backoff;

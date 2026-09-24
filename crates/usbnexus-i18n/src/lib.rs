@@ -83,6 +83,11 @@ impl Localizer {
         self.lang
     }
 
+    /// Whether any loaded locale defines `id`.
+    pub fn has(&self, id: &str) -> bool {
+        self.bundles.iter().any(|b| b.has_message(id))
+    }
+
     /// Formats a message; returns the id itself when no locale has it.
     pub fn format(&self, id: &str, args: Option<&FluentArgs>) -> String {
         for b in &self.bundles {

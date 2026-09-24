@@ -28,8 +28,41 @@ başarısız olur.
 ## Derleme
 
 ```sh
+cargo build --release      # çıktı: target/release/usbnexus
 cargo test --workspace
 ```
+
+## Kullanım (Linux, ilk sürüm)
+
+Her iki bilgisayarda çekirdek modüllerini yükleyin ve komutları `sudo` ile çalıştırın:
+
+```sh
+# Sunucu (USB cihazının takılı olduğu bilgisayar)
+sudo modprobe usbip-host
+sudo usbnexus local                         # paylaşılabilecek cihazları listeler
+sudo usbnexus serve --export 1-2 --pair     # 1-2 cihazını paylaşır, PIN gösterir
+sudo usbnexus pin                           # (çalışan sunucu için) yeni PIN üretir
+
+# İstemci (cihazı kullanacak bilgisayar)
+sudo modprobe vhci-hcd
+sudo usbnexus discover                      # ağdaki sunucuları bulur
+sudo usbnexus pair ofis-pc                  # PIN sorar ve eşleştirir (bir kez)
+sudo usbnexus list ofis-pc                  # paylaşılan cihazları listeler
+sudo usbnexus attach ofis-pc 1-2            # cihazı bağlar; bağlantı koparsa kendisi yeniden bağlanır
+```
+
+Bağlantı TLS 1.3 ile şifrelenir. İki taraf da birbirini PIN ile eşleştirme sırasında kaydedilen sertifika
+parmak iziyle doğrular. Sunucunun IP adresi değişse bile istemci onu yerel ağda (mDNS) parmak izinden
+yeniden bulur.
+
+## Platform yol haritası
+
+| Senaryo | Sürücü | Durum |
+|---|---|---|
+| Linux sunucu ↔ Linux istemci | Çekirdekteki `usbip-host` / `vhci-hcd` | Çalışıyor (donanım testi bekliyor) |
+| Windows sunucu | VBoxUSB (Oracle, Microsoft imzalı, GPL-3.0) | Planlandı |
+| Windows istemci | usbip-win2 (attestation imzalı, BSD-2) | Planlandı |
+| Grafik arayüz | Tauri, aynı `locales/` çevirileri | Planlandı |
 
 ## Lisans
 

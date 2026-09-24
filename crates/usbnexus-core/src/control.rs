@@ -13,8 +13,8 @@
 //!   Import ──▶ ◀── Imported                  after this the stream carries raw USB/IP URBs
 //! ```
 
-use usbnexus_proto::DeviceInfo;
 use serde::{Deserialize, Serialize};
+use usbnexus_proto::DeviceInfo;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]

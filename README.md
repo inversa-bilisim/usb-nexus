@@ -18,7 +18,8 @@ Hedefler:
 | `crates/usbnexus-cli` | `usbnexus` komut satırı aracı ve servis |
 | `apps/desktop` | Masaüstü uygulaması (Tauri 2; arayüz `apps/desktop/ui`) |
 | `packaging/linux` | systemd servisi ve elle kurulum notları |
-| `packaging/windows` | Windows hizmeti, NSIS kurulum paketi ayarları |
+| `packaging/windows` | Windows hizmeti, NSIS kurulum paketi ayarları, VBoxUSB sürücüleri |
+| `packaging/macos` | launchd hizmeti, `.pkg` üretme betiği |
 | `locales/` | Çeviri dosyaları: `en.ftl`, `tr.ftl` |
 
 ## Diller
@@ -48,6 +49,18 @@ export USBNEXUS_SOCKET=/tmp/usbnexus-demo.sock
 target/debug/usbnexus daemon --demo --state-dir /tmp/usbnexus-demo --socket $USBNEXUS_SOCKET &
 target/debug/usbnexus-desktop
 ```
+
+## Kurulum paketleri
+
+| Platform | Paketler | Nasıl üretilir |
+|---|---|---|
+| Debian/Ubuntu | `usbnexus_*.deb` (hizmet + komut satırı), `usb-nexus_*.deb` (masaüstü) | [packaging/linux](packaging/linux/README.md) |
+| Fedora/RHEL/openSUSE | `usbnexus-*.rpm`, `USB Nexus-*.rpm` | [packaging/linux](packaging/linux/README.md) |
+| Windows | `USB Nexus_*_x64-setup.exe` | [packaging/windows](packaging/windows/README.md) |
+| macOS | `USB Nexus-*.pkg` | [packaging/macos](packaging/macos/README.md) |
+
+Bir `v*` sürüm etiketi pushlandığında `.github/workflows/release.yml` hepsini üretir ve taslak bir
+GitHub sürümüne ekler.
 
 ## Derleme
 
@@ -94,7 +107,9 @@ yeniden bulur.
 | Windows sunucu | VBoxUSB (Oracle + Microsoft imzalı, GPL-3.0) | Yazıldı; gerçek Windows'ta test bekliyor |
 | Grafik arayüz (Linux) | Tauri, aynı `locales/` çevirileri | Çalışıyor (demo ile test edildi) |
 | Grafik arayüz (Windows) | Hizmetle adlandırılmış kanal (`\\.\pipe\usbnexus`) | Yazıldı; test bekliyor |
-| Grafik arayüz (macOS) | — | Planlandı |
+| macOS sunucu (Mac'teki cihazı paylaşma) | libusb (programa gömülü) | Yazıldı; macOS'un kendi sürücüsünü kullandığı cihazlar hariç ([ayrıntılar](packaging/macos/README.md)) |
+| macOS istemci | — | Mümkün değil (Apple sanal USB denetleyiciye izin vermiyor) |
+| Grafik arayüz (macOS) | Hizmetle Unix soketi | Yazıldı; test bekliyor |
 
 ## Lisans
 

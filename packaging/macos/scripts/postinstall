@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Runs as root after the package is installed.
+PLIST=/Library/LaunchDaemons/org.usbnexus.daemon.plist
+mkdir -p "/Library/Logs/USB Nexus"
+chown root:wheel "$PLIST"
+chmod 644 "$PLIST"
+launchctl bootout system "$PLIST" 2>/dev/null || true
+launchctl bootstrap system "$PLIST"
+launchctl enable system/org.usbnexus.daemon
+exit 0

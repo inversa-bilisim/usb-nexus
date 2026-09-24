@@ -26,6 +26,17 @@ mdns-sd.workspace = true
 tracing.workspace = true
 subtle.workspace = true
 
+# Userspace USB access (macOS device sharing; optional elsewhere).
+rusb = { version = "0.9", features = ["vendored"], optional = true }
+
+[features]
+# Build the libusb device host on platforms other than macOS (for testing,
+# or as an alternative to the in-kernel usbip-host driver on Linux).
+libusb = ["dep:rusb"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rusb = { version = "0.9", features = ["vendored"] }
+
 [dev-dependencies]
 tempfile = "3"
 

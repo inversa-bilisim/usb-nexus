@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+if [ "$1" = "remove" ] && [ -d /run/systemd/system ]; then
+    systemctl disable --now usbnexus.service >/dev/null 2>&1 || true
+fi
+exit 0

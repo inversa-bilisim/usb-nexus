@@ -33,3 +33,6 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: libusb device host
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p usbnexus-core --features libusb --lib libusb

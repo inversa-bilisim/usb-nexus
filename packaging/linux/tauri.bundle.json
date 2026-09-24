@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["deb", "rpm"],
+    "linux": {
+      "deb": {
+        "depends": ["usbnexus (>= 0.1.0)"],
+        "section": "net"
+      },
+      "rpm": {
+        "depends": ["usbnexus >= 0.1.0"]
+      }
+    }
+  }
+}

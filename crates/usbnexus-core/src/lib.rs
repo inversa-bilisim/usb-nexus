@@ -30,6 +30,8 @@ pub mod tls;
 pub mod trust;
 pub mod usb_server;
 
+#[cfg(any(target_os = "macos", feature = "libusb"))]
+pub mod libusb_host;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(windows)]

@@ -670,7 +670,12 @@ function pageServiceDown() {
     h("p", {}, t("gui-service-down-body")),
     ...(state.os === "windows"
       ? [h("p", {}, t("gui-service-down-windows")), h("code", {}, "usbnexus service install")]
-      : [h("p", {}, t("gui-service-down-linux")), h("code", {}, "sudo systemctl start usbnexus")]),
+      : state.os === "macos"
+        ? [
+            h("p", {}, t("gui-service-down-macos")),
+            h("code", {}, "sudo launchctl bootstrap system /Library/LaunchDaemons/org.usbnexus.daemon.plist"),
+          ]
+        : [h("p", {}, t("gui-service-down-linux")), h("code", {}, "sudo systemctl start usbnexus")]),
     h("div", {}, h("button", { class: "btn primary", onclick: () => refresh() }, t("gui-retry"))),
   );
 }

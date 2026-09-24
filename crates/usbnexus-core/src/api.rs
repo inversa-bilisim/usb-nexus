@@ -206,6 +206,8 @@ pub fn default_socket() -> std::path::PathBuf {
     }
     if cfg!(windows) {
         std::path::PathBuf::from(r"\\.\pipe\usbnexus")
+    } else if cfg!(target_os = "macos") {
+        std::path::PathBuf::from("/var/run/usbnexus/daemon.sock")
     } else {
         std::path::PathBuf::from("/run/usbnexus/daemon.sock")
     }

@@ -29,3 +29,45 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
+
+# `cargo deb -p usbnexus-cli` (after `cargo build --release -p usbnexus-cli`)
+[package.metadata.deb]
+name = "usbnexus"
+maintainer = "USB Nexus contributors"
+copyright = "2026, USB Nexus contributors"
+license-file = ["../../LICENSE", "0"]
+section = "net"
+priority = "optional"
+extended-description = """\
+USB Nexus shares USB devices over the network with TLS encryption, PIN \
+pairing, automatic discovery and automatic reconnection. This package \
+contains the usbnexus command line tool and the background service. \
+The kernel's usbip-host and vhci-hcd modules are required (on Ubuntu \
+they are in linux-modules-extra)."""
+depends = "$auto, systemd"
+recommends = "usb-nexus"
+maintainer-scripts = "../../packaging/linux/debian"
+assets = [
+    ["target/release/usbnexus", "usr/bin/", "755"],
+    ["../../packaging/linux/usbnexus.service", "usr/lib/systemd/system/usbnexus.service", "644"],
+    ["../../packaging/linux/usbnexus.sysusers", "usr/lib/sysusers.d/usbnexus.conf", "644"],
+    ["../../README.md", "usr/share/doc/usbnexus/README.md", "644"],
+]
+
+# `cargo generate-rpm -p crates/usbnexus-cli` (after the release build)
+[package.metadata.generate-rpm]
+name = "usbnexus"
+summary = "Secure USB over IP: command line tool and service"
+license = "GPL-3.0-or-later"
+post_install_script = "../../packaging/linux/rpm/post.sh"
+pre_uninstall_script = "../../packaging/linux/rpm/preun.sh"
+post_uninstall_script = "../../packaging/linux/rpm/postun.sh"
+assets = [
+    { source = "target/release/usbnexus", dest = "/usr/bin/usbnexus", mode = "755" },
+    { source = "../../packaging/linux/usbnexus.service", dest = "/usr/lib/systemd/system/usbnexus.service", mode = "644" },
+    { source = "../../packaging/linux/usbnexus.sysusers", dest = "/usr/lib/sysusers.d/usbnexus.conf", mode = "644" },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/usbnexus/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"

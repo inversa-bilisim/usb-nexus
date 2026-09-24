@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -e
+
+# Group whose members may control the service from the desktop app.
+if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers usbnexus.conf || true
+elif ! getent group usbnexus >/dev/null 2>&1; then
+    groupadd --system usbnexus || true
+fi
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    systemctl enable usbnexus.service >/dev/null 2>&1 || true
+    systemctl restart usbnexus.service || true
+fi
+
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+    echo "USB Nexus: add desktop users to the 'usbnexus' group: sudo usermod -aG usbnexus <user>"
+fi
+exit 0

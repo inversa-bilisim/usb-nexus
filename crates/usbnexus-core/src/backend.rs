@@ -124,6 +124,23 @@ impl DeviceHost for UnsupportedHost {
     }
 }
 
+/// Placeholder for platforms that cannot attach remote devices (macOS has
+/// no virtual USB host controller available to third parties).
+pub struct UnsupportedImport;
+
+impl ImportBackend for UnsupportedImport {
+    fn attach<'a>(&'a self, _device: &'a DeviceInfo) -> BoxFuture<'a, Result<(u32, tokio::net::TcpStream)>> {
+        Box::pin(async {
+            Err(crate::api::ApiError::new("unsupported", "using remote devices is not supported on this platform")
+                .into())
+        })
+    }
+
+    fn detach(&self, _port: u32) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// Client side: attaches remote devices to a virtual host controller.
 pub trait ImportBackend: Send + Sync + 'static {
     /// Attaches `device`; returns the virtual port and the socket that

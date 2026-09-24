@@ -177,6 +177,9 @@ fn default_state_dir() -> PathBuf {
     if cfg!(target_os = "linux") && is_root() {
         return PathBuf::from("/var/lib/usbnexus");
     }
+    if cfg!(target_os = "macos") && is_root() {
+        return PathBuf::from("/Library/Application Support/USB Nexus");
+    }
     directories::ProjectDirs::from("org", "usbnexus", "usbnexus")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(".usbnexus"))
@@ -328,7 +331,14 @@ fn backends(
         use usbnexus_core::windows_host::WindowsHost;
         Ok((Arc::new(WindowsHost), Arc::new(WindowsImport::default())))
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(target_os = "macos")]
+    {
+        // Sharing through libusb; macOS cannot use remote devices.
+        use usbnexus_core::backend::UnsupportedImport;
+        use usbnexus_core::libusb_host::LibusbHost;
+        Ok((Arc::new(LibusbHost), Arc::new(UnsupportedImport)))
+    }
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     {
         bail!(t!("unsupported-os"))
     }
@@ -439,7 +449,9 @@ fn secure_socket(path: &Path, allow_all: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = if allow_all {
         0o666
-    } else if let Some(gid) = group_id("usbnexus") {
+    } else if let Some(gid) =
+        group_id("usbnexus").or_else(|| cfg!(target_os = "macos").then(|| group_id("admin")).flatten())
+    {
         let c = std::ffi::CString::new(path.as_os_str().as_bytes())?;
         // SAFETY: `c` is a valid NUL-terminated path; -1 keeps the owner.
         if unsafe { libc::chown(c.as_ptr(), u32::MAX, gid) } != 0 {
@@ -479,10 +491,15 @@ async fn pin(ctx: &Ctx, seconds: u64) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", windows, target_os = "macos"))]
 fn local() -> Result<()> {
     #[cfg(target_os = "linux")]
     let devices = usbnexus_core::linux::list_local(Path::new("/sys"))?;
+    #[cfg(target_os = "macos")]
+    let devices = {
+        use usbnexus_core::backend::DeviceHost;
+        usbnexus_core::libusb_host::LibusbHost.list_all()?
+    };
     #[cfg(windows)]
     let devices = {
         use usbnexus_core::backend::DeviceHost;
@@ -509,7 +526,7 @@ fn local() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 fn local() -> Result<()> {
     bail!(t!("unsupported-os"))
 }

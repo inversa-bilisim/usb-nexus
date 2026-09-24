@@ -6,17 +6,19 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
-use crate::backend::ExportBackend;
+use crate::backend::{ExportBackend, Offered};
 use crate::control::{ClientMsg, ErrorCode, ExportedDevice, ServerMsg};
+use crate::device_id::DeviceId;
 use crate::frame::{read_frame, write_frame};
 use crate::identity::Identity;
 use crate::pairing::{PairingWindow, Pake, Role};
@@ -34,13 +36,49 @@ pub struct ServerConfig {
     pub backend: Arc<dyn ExportBackend>,
 }
 
+/// A computer and a device, as reported in [`ServerEvent`]s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceUse {
+    /// Device identity (see [`DeviceId`]).
+    pub device: String,
+    /// Current bus id, while the device is plugged in.
+    pub busid: Option<String>,
+    /// Human readable device name, when known.
+    pub device_name: Option<String>,
+    /// Name the client computer gave itself.
+    pub client: String,
+    pub fingerprint: String,
+    pub addr: SocketAddr,
+}
+
 /// Events reported to the embedding application (CLI or GUI).
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
-    Paired { name: String, fingerprint: String },
-    PairingFailed { addr: SocketAddr },
-    Exported { busid: String, client: String },
-    Released { busid: String, client: String },
+    Paired {
+        name: String,
+        fingerprint: String,
+        addr: SocketAddr,
+    },
+    PairingFailed {
+        addr: SocketAddr,
+        name: String,
+        fingerprint: String,
+    },
+    Exported(DeviceUse),
+    Released {
+        usage: DeviceUse,
+        duration: Duration,
+    },
+    /// A paired computer asked for a device it may not use.
+    Denied(DeviceUse),
+}
+
+/// A device being used by a client.
+struct ActiveUse {
+    client: String,
+    fingerprint: String,
+    /// Ends the session when notified.
+    stop: Arc<Notify>,
 }
 
 type EventSink = Arc<dyn Fn(ServerEvent) + Send + Sync>;
@@ -52,8 +90,8 @@ struct Inner {
     trust: TrustStore,
     backend: Arc<dyn ExportBackend>,
     pairing: Mutex<Option<PairingWindow>>,
-    /// busid -> name of the client using it.
-    in_use: Mutex<HashMap<String, String>>,
+    /// Device identity -> the client using it.
+    in_use: Mutex<HashMap<String, ActiveUse>>,
     events: EventSink,
 }
 
@@ -108,9 +146,38 @@ impl Server {
         *self.inner.pairing.lock().unwrap() = None;
     }
 
-    /// Devices currently used by clients: busid -> client name.
-    pub fn in_use(&self) -> HashMap<String, String> {
-        self.inner.in_use.lock().unwrap().clone()
+    /// Devices currently used by clients: device identity -> (client name,
+    /// client fingerprint).
+    pub fn in_use(&self) -> HashMap<String, (String, String)> {
+        let in_use = self.inner.in_use.lock().unwrap();
+        in_use.iter().map(|(id, u)| (id.clone(), (u.client.clone(), u.fingerprint.clone()))).collect()
+    }
+
+    /// Ends the sessions for which `stop(device identity, client
+    /// fingerprint)` is true, e.g. after permission was revoked. Returns how
+    /// many were ended.
+    pub fn disconnect(&self, stop: impl Fn(&str, &str) -> bool) -> usize {
+        let in_use = self.inner.in_use.lock().unwrap();
+        let mut n = 0;
+        for (id, u) in in_use.iter() {
+            if stop(id, &u.fingerprint) {
+                u.stop.notify_one();
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Ends sessions that the current sharing and access settings no longer
+    /// allow (device unshared, permission revoked, computer forgotten).
+    pub fn enforce(&self) -> Result<usize> {
+        let offered = self.inner.backend.list()?;
+        let trust = &self.inner.trust;
+        Ok(self.disconnect(|id, fp| {
+            let wanted = DeviceId::parse(id);
+            let allowed = offered.iter().find(|o| o.is(&wanted)).is_some_and(|o| o.allowed.allows(fp));
+            !allowed || !trust.is_trusted(fp)
+        }))
     }
 
     /// Remaining PIN and lifetime of an open pairing window.
@@ -203,19 +270,16 @@ async fn handle(inner: Arc<Inner>, tcp: TcpStream, addr: SocketAddr) -> Result<(
                         continue;
                     }
                 };
-                let in_use = inner.in_use.lock().unwrap().clone();
-                let devices = devices
-                    .into_iter()
-                    .map(|d| ExportedDevice {
-                        in_use: in_use.contains_key(&d.info.busid),
-                        info: d.info,
-                        product: d.product,
-                        manufacturer: d.manufacturer,
-                    })
-                    .collect();
+                let devices = {
+                    let in_use = inner.in_use.lock().unwrap();
+                    devices.into_iter().map(|o| exported(o, &client_fp, &in_use)).collect()
+                };
                 write_frame(&mut tls, &ServerMsg::Devices { devices }).await?;
             }
-            ClientMsg::Import { busid } => return import(&inner, tls, &busid, &client_name).await,
+            ClientMsg::Import { device } => {
+                let client = Client { name: &client_name, fingerprint: &client_fp, addr };
+                return import(&inner, tls, &device, client).await;
+            }
         }
     }
 }
@@ -253,7 +317,11 @@ where
             w.failures += 1;
         }
         warn!(%addr, "pairing attempt failed");
-        (inner.events)(ServerEvent::PairingFailed { addr });
+        (inner.events)(ServerEvent::PairingFailed {
+            addr,
+            name: client_name.to_string(),
+            fingerprint: client_fp.to_string(),
+        });
         send_error(tls, ErrorCode::PairingFailed, "pairing failed").await?;
         return Ok(false);
     }
@@ -269,40 +337,117 @@ where
     let own = confirm.expect("checked above").own_mac();
     write_frame(tls, &ServerMsg::PairConfirm { mac: own }).await?;
     info!(client = %client_name, "paired new client");
-    (inner.events)(ServerEvent::Paired { name: client_name.to_string(), fingerprint: client_fp.to_string() });
+    (inner.events)(ServerEvent::Paired { name: client_name.to_string(), fingerprint: client_fp.to_string(), addr });
     Ok(true)
 }
 
-/// Removes a busid from the in-use set when dropped.
+/// Builds the listing entry of an offered device for one client.
+fn exported(o: Offered, client_fp: &str, in_use: &HashMap<String, ActiveUse>) -> ExportedDevice {
+    let id = o.id.to_string();
+    let present = o.device.is_some();
+    let info = match o.device {
+        Some(d) => d.info,
+        None => {
+            let (vendor, product) = o.id.ids().unwrap_or_default();
+            usbnexus_proto::DeviceInfo {
+                path: String::new(),
+                busid: o.id.busid().unwrap_or_default().to_string(),
+                busnum: 0,
+                devnum: 0,
+                speed: usbnexus_proto::Speed::Unknown,
+                id_vendor: vendor,
+                id_product: product,
+                bcd_device: 0,
+                device_class: 0,
+                device_subclass: 0,
+                device_protocol: 0,
+                configuration_value: 0,
+                num_configurations: 0,
+                interfaces: vec![],
+            }
+        }
+    };
+    ExportedDevice {
+        in_use: in_use.contains_key(&id),
+        allowed: o.allowed.allows(client_fp),
+        id,
+        info,
+        present,
+        product: o.product,
+        manufacturer: o.manufacturer,
+    }
+}
+
+/// The client of a connection.
+#[derive(Clone, Copy)]
+struct Client<'a> {
+    name: &'a str,
+    fingerprint: &'a str,
+    addr: SocketAddr,
+}
+
+/// Removes a device from the in-use set when dropped.
 struct InUse<'a> {
-    set: &'a Mutex<HashMap<String, String>>,
-    busid: String,
+    set: &'a Mutex<HashMap<String, ActiveUse>>,
+    id: String,
 }
 
 impl Drop for InUse<'_> {
     fn drop(&mut self) {
-        self.set.lock().unwrap().remove(&self.busid);
+        self.set.lock().unwrap().remove(&self.id);
     }
 }
 
-async fn import<S>(inner: &Inner, mut tls: S, busid: &str, client_name: &str) -> Result<()>
+async fn import<S>(inner: &Inner, mut tls: S, wanted: &str, client: Client<'_>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let device = match inner.backend.list()?.into_iter().find(|d| d.info.busid == busid) {
-        Some(d) => d,
-        None => return send_error(&mut tls, ErrorCode::NoSuchDevice, format!("{busid} is not exported")).await,
+    let wanted_id = DeviceId::parse(wanted);
+    let Some(offered) = inner.backend.list()?.into_iter().find(|o| o.is(&wanted_id)) else {
+        return send_error(&mut tls, ErrorCode::NoSuchDevice, format!("{wanted} is not shared")).await;
     };
+    let id = offered.id.to_string();
+    let usage = DeviceUse {
+        device: id.clone(),
+        busid: offered.device.as_ref().map(|d| d.info.busid.clone()),
+        device_name: [offered.manufacturer.clone(), offered.product.clone()]
+            .into_iter()
+            .flatten()
+            .reduce(|a, b| format!("{a} {b}")),
+        client: client.name.to_string(),
+        fingerprint: client.fingerprint.to_string(),
+        addr: client.addr,
+    };
+    if !offered.allowed.allows(client.fingerprint) {
+        info!(device = %id, client = %client.name, "access denied");
+        (inner.events)(ServerEvent::Denied(usage));
+        return send_error(&mut tls, ErrorCode::AccessDenied, format!("not allowed to use {wanted}")).await;
+    }
+    let Some(device) = offered.device else {
+        return send_error(&mut tls, ErrorCode::NoSuchDevice, format!("{wanted} is not plugged in")).await;
+    };
+    let busid = device.info.busid.clone();
+    let stop = Arc::new(Notify::new());
     let claimed = {
         let mut in_use = inner.in_use.lock().unwrap();
-        !in_use.contains_key(busid) && in_use.insert(busid.to_string(), client_name.to_string()).is_none()
+        if in_use.contains_key(&id) {
+            false
+        } else {
+            let active = ActiveUse {
+                client: client.name.to_string(),
+                fingerprint: client.fingerprint.to_string(),
+                stop: stop.clone(),
+            };
+            in_use.insert(id.clone(), active);
+            true
+        }
     };
     if !claimed {
-        return send_error(&mut tls, ErrorCode::DeviceBusy, format!("{busid} is in use")).await;
+        return send_error(&mut tls, ErrorCode::DeviceBusy, format!("{wanted} is in use")).await;
     }
-    let _guard = InUse { set: &inner.in_use, busid: busid.to_string() };
+    let _guard = InUse { set: &inner.in_use, id: id.clone() };
 
-    let local = match inner.backend.export(busid).await {
+    let local = match inner.backend.export(&busid).await {
         Ok(s) => s,
         Err(e) => {
             warn!(busid, "export failed: {e:#}");
@@ -311,15 +456,19 @@ where
                 Some("no_such_device") => ErrorCode::NoSuchDevice,
                 _ => ErrorCode::Internal,
             };
-            return send_error(&mut tls, code, format!("could not export {busid}")).await;
+            return send_error(&mut tls, code, format!("could not export {wanted}")).await;
         }
     };
-    write_frame(&mut tls, &ServerMsg::Imported { device: device.info }).await?;
-    info!(busid, client = %client_name, "device exported");
-    (inner.events)(ServerEvent::Exported { busid: busid.to_string(), client: client_name.to_string() });
+    write_frame(&mut tls, &ServerMsg::Imported { device: device.info, id: Some(id.clone()) }).await?;
+    info!(busid, device = %id, client = %client.name, "device exported");
+    (inner.events)(ServerEvent::Exported(usage.clone()));
+    let since = Instant::now();
 
-    let end = relay(tls, local).await;
-    info!(busid, client = %client_name, ?end, "device released");
-    (inner.events)(ServerEvent::Released { busid: busid.to_string(), client: client_name.to_string() });
+    tokio::select! {
+        end = relay(tls, local) => info!(busid, client = %client.name, ?end, "device released"),
+        // Dropping the relay closes both sockets.
+        _ = stop.notified() => info!(busid, client = %client.name, "session ended by the server"),
+    }
+    (inner.events)(ServerEvent::Released { usage, duration: since.elapsed() });
     Ok(())
 }

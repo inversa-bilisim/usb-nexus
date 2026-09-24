@@ -87,6 +87,16 @@ pub fn table(headers: &[String], rows: &[Vec<String>]) {
     }
 }
 
+/// Formats a duration in seconds as `1:02:03` or `2:03`.
+pub fn duration(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 fn remote_key(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::Version => "err-version",
@@ -95,6 +105,7 @@ fn remote_key(code: ErrorCode) -> &'static str {
         ErrorCode::PairingFailed => "err-pairing-failed",
         ErrorCode::NoSuchDevice => "err-no-such-device",
         ErrorCode::DeviceBusy => "err-device-busy",
+        ErrorCode::AccessDenied => "err-access-denied",
         ErrorCode::Internal => "err-internal",
         ErrorCode::Protocol => "err-protocol",
     }

@@ -69,9 +69,13 @@ async fn share_pair_attach_restore_detach() {
     let b = node(dir_b.path(), "laptop").await;
 
     // A shares one device.
-    let _: () = call(&a, Request::SetShared { busid: "1-1".into(), shared: true }).await;
+    let _: () = call(&a, Request::SetShared { device: "1-1".into(), shared: true }).await;
     let local: Vec<LocalDeviceView> = call(&a, Request::LocalDevices).await;
-    assert_eq!(local.iter().filter(|d| d.shared).map(|d| d.busid.as_str()).collect::<Vec<_>>(), ["1-1"]);
+    let shared: Vec<&LocalDeviceView> = local.iter().filter(|d| d.shared).collect();
+    assert_eq!(shared.len(), 1);
+    assert_eq!(shared[0].busid.as_deref(), Some("1-1"));
+    let id = shared[0].id.clone();
+    assert_eq!(id, "0781:5567:4C530001231120115142", "shared by identity");
 
     // B cannot pair with a wrong PIN, then pairs with the right one.
     let pin: PairingView = call(&a, Request::OpenPairing { seconds: 60 }).await;
@@ -91,14 +95,14 @@ async fn share_pair_attach_restore_detach() {
     let remote: Vec<RemoteDeviceView> = call(&b, Request::RemoteDevices { server: server_fp.clone() }).await;
     assert_eq!(remote.len(), 1);
     assert!(!remote[0].in_use && !remote[0].attached_here);
-    let _: () = call(&b, Request::Attach { server: server_fp.clone(), busid: "1-1".into() }).await;
+    let _: () = call(&b, Request::Attach { server: server_fp.clone(), device: id.clone() }).await;
     let list = wait_for(&b, attached).await;
     assert_eq!(list[0].server_name, "office");
     assert_eq!(list[0].vendor_id, Some(0x0781));
 
     // A sees who uses the device; B sees it as attached here.
     let local: Vec<LocalDeviceView> = call(&a, Request::LocalDevices).await;
-    assert_eq!(local.iter().find(|d| d.busid == "1-1").unwrap().used_by.as_deref(), Some("laptop"));
+    assert_eq!(local.iter().find(|d| d.id == id).unwrap().used_by.as_deref(), Some("laptop"));
     let remote: Vec<RemoteDeviceView> = call(&b, Request::RemoteDevices { server: server_fp.clone() }).await;
     assert!(remote[0].in_use && remote[0].attached_here);
 
@@ -109,7 +113,7 @@ async fn share_pair_attach_restore_detach() {
     wait_for(&b, attached).await;
 
     // Detaching removes it and frees the device on A.
-    let _: () = call(&b, Request::Detach { server: server_fp.clone(), busid: "1-1".into() }).await;
+    let _: () = call(&b, Request::Detach { server: server_fp.clone(), device: id.clone() }).await;
     wait_for(&b, |a| a.is_empty()).await;
     for _ in 0..50 {
         let local: Vec<LocalDeviceView> = call(&a, Request::LocalDevices).await;
@@ -131,7 +135,7 @@ async fn share_pair_attach_restore_detach() {
 async fn attach_requires_pairing_and_bad_requests_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let n = node(dir.path(), "solo").await;
-    let e = api::call::<()>(&n.socket, &Request::Attach { server: "ab".repeat(32), busid: "1-1".into() })
+    let e = api::call::<()>(&n.socket, &Request::Attach { server: "ab".repeat(32), device: "1-1".into() })
         .await
         .unwrap_err();
     assert_eq!(e.downcast_ref::<api::ApiError>().unwrap().code, "not_trusted");

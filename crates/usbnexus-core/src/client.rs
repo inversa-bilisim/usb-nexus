@@ -150,15 +150,18 @@ impl Session {
         .await
     }
 
-    /// Imports `busid`. The returned stream carries raw USB/IP URB traffic.
-    pub async fn import(mut self, busid: &str) -> Result<(DeviceInfo, TlsStream<TcpStream>)> {
-        write_frame(&mut self.stream, &ClientMsg::Import { busid: busid.to_string() }).await?;
-        let device = expect(&mut self.stream, |m| match m {
-            ServerMsg::Imported { device } => Some(device),
+    /// Imports `device` (a device identity, or a bus id). Returns the
+    /// device, its identity, and the stream, which from now on carries raw
+    /// USB/IP URB traffic.
+    pub async fn import(mut self, device: &str) -> Result<(DeviceInfo, String, TlsStream<TcpStream>)> {
+        write_frame(&mut self.stream, &ClientMsg::Import { device: device.to_string() }).await?;
+        let (info, id) = expect(&mut self.stream, |m| match m {
+            ServerMsg::Imported { device, id } => Some((device, id)),
             _ => None,
         })
         .await?;
-        Ok((device, self.stream))
+        // Older servers do not report the identity.
+        Ok((info, id.unwrap_or_else(|| device.to_string()), self.stream))
     }
 }
 
@@ -234,6 +237,9 @@ pub enum AttachEvent {
     Attached {
         port: u32,
         device: DeviceInfo,
+        /// Identity of the device on the server. When the attachment was
+        /// asked for by bus id, later attempts use this instead.
+        id: String,
     },
     /// The connection failed or dropped; `error.code` says why.
     Disconnected {
@@ -246,52 +252,63 @@ pub enum AttachEvent {
     Detached,
 }
 
-/// Whether an error cannot be fixed by retrying.
+/// How often to ask again for a device that is not plugged in.
+const DEVICE_WAIT: Duration = Duration::from_secs(5);
+
+/// Whether an error cannot be fixed by retrying. A missing device or a
+/// missing permission is not permanent: the device may be plugged in, or
+/// permission granted, later.
 fn is_permanent(e: &anyhow::Error) -> bool {
     if e.downcast_ref::<ClientError>().is_some_and(|c| matches!(c, ClientError::PairingRequired { .. })) {
         return true;
     }
     if let Some(r) = e.downcast_ref::<RemoteError>() {
-        return matches!(
-            r.code,
-            ErrorCode::NotTrusted | ErrorCode::NoSuchDevice | ErrorCode::Version | ErrorCode::PairingFailed
-        );
+        return matches!(r.code, ErrorCode::NotTrusted | ErrorCode::Version | ErrorCode::PairingFailed);
     }
     false
 }
 
-/// Attaches `busid` from `target` and keeps it attached: when the network
-/// connection drops, it reconnects with backoff and re-attaches the device.
+/// Attaches `device` (a device identity, or a bus id) from `target` and
+/// keeps it attached: when the network connection drops, or the device is
+/// unplugged, it retries and re-attaches the device when it is back.
 /// Returns when the device is detached locally or on a permanent error.
 pub async fn attach_forever(
     cfg: &ClientConfig,
     target: &Target,
-    busid: &str,
+    device: &str,
     backend: Arc<dyn ImportBackend>,
     events: impl Fn(AttachEvent),
 ) -> Result<()> {
     let mut backoff = Backoff::default();
+    let mut wanted = device.to_string();
     loop {
         let attempt = async {
             let session = target.connect(cfg, &events).await?;
-            session.import(busid).await
+            session.import(&wanted).await
         };
-        let (device, stream) = match attempt.await {
+        let (device, id, stream) = match attempt.await {
             Ok(v) => v,
             Err(e) if is_permanent(&e) => return Err(e),
             Err(e) => {
-                warn!("attach attempt failed: {e:#}");
-                events(AttachEvent::Disconnected { error: crate::api::ApiError::from_anyhow(&e) });
-                let delay = backoff.next_delay();
+                let error = crate::api::ApiError::from_anyhow(&e);
+                let missing = error.code == "no_such_device";
+                if missing {
+                    debug!("waiting for the device: {e:#}");
+                } else {
+                    warn!("attach attempt failed: {e:#}");
+                }
+                events(AttachEvent::Disconnected { error });
+                let delay = if missing { backoff.next_delay().min(DEVICE_WAIT) } else { backoff.next_delay() };
                 events(AttachEvent::Retrying { delay });
                 tokio::time::sleep(delay).await;
                 continue;
             }
         };
 
+        wanted.clone_from(&id);
         let (port, local) = backend.attach(&device).await.context("attaching device locally")?;
         backoff.reset();
-        events(AttachEvent::Attached { port, device: device.clone() });
+        events(AttachEvent::Attached { port, device: device.clone(), id });
 
         match relay(stream, local).await {
             RelayEnd::Local(_) => {
@@ -312,9 +329,12 @@ pub async fn attach_forever(
     }
 }
 
-/// Finds a device by busid in a list, for friendlier error messages.
-pub fn find_device<'a>(devices: &'a [ExportedDevice], busid: &str) -> Result<&'a ExportedDevice> {
-    devices.iter().find(|d| d.info.busid == busid).ok_or_else(|| anyhow!("no device {busid} on server"))
+/// Finds a device by identity or bus id in a list, for friendlier error messages.
+pub fn find_device<'a>(devices: &'a [ExportedDevice], device: &str) -> Result<&'a ExportedDevice> {
+    devices
+        .iter()
+        .find(|d| d.id == device || (d.present && d.info.busid == device))
+        .ok_or_else(|| anyhow!("no device {device} on server"))
 }
 
 #[cfg(test)]

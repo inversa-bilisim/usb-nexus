@@ -23,6 +23,7 @@ const state = {
   attachmentsCount: 0,
   serviceDown: false,
   pollTimer: null,
+  policyAsked: false,
 };
 
 // ---------------------------------------------------------------- i18n
@@ -78,6 +79,10 @@ const ICONS = {
   back: "M15 18l-6-6 6-6",
   plus: "M12 5v14M5 12h14",
   chevron: "M9 6l6 6-6 6",
+  clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
+  settings: "M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4",
+  shield: "M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z",
+  download: "M12 4v11M7 10l5 5 5-5M5 20h14",
 };
 
 function icon(name, cls) {
@@ -107,17 +112,17 @@ function deviceName(d) {
 
 // Remembers remote device names so "Connected devices" can show them.
 const names = {
-  get(server, busid) {
+  get(server, device) {
     try {
-      return JSON.parse(localStorage.getItem("names") || "{}")[server + "/" + busid];
+      return JSON.parse(localStorage.getItem("names") || "{}")[server + "/" + device];
     } catch {
       return undefined;
     }
   },
-  put(server, busid, name) {
+  put(server, device, name) {
     try {
       const all = JSON.parse(localStorage.getItem("names") || "{}");
-      all[server + "/" + busid] = name;
+      all[server + "/" + device] = name;
       localStorage.setItem("names", JSON.stringify(all));
     } catch {
       /* storage unavailable: names are a convenience only */
@@ -179,7 +184,11 @@ function openModal(content, { onClose } = {}) {
   };
   const onKey = (e) => e.key === "Escape" && close();
   document.addEventListener("keydown", onKey);
-  backdrop.onclick = (e) => e.target === backdrop && close();
+  // Returning false from an onclick property would cancel clicks inside the
+  // dialog (checkboxes, submit buttons), so nothing is returned.
+  backdrop.onclick = (e) => {
+    if (e.target === backdrop) close();
+  };
   setTimeout(() => (box.querySelector("input, .btn.primary, .btn") || box).focus(), 0);
   return close;
 }
@@ -191,6 +200,8 @@ const VIEWS = [
   ["network", "network", "gui-nav-network"],
   ["connected", "plug", "gui-nav-connected"],
   ["paired", "link", "gui-nav-paired"],
+  ["history", "clock", "gui-nav-history"],
+  ["settings", "settings", "gui-nav-settings"],
 ];
 
 function renderSidebar() {
@@ -262,17 +273,26 @@ function deviceMeta(d, extra = []) {
   return h(
     "div",
     { class: "row-meta" },
-    h("span", { class: "mono" }, d.busid),
+    d.busid ? h("span", { class: "mono" }, d.busid) : null,
     h("span", { class: "mono" }, `${hex4(d.vendor_id)}:${hex4(d.product_id)}`),
     d.speed ? h("span", {}, d.speed) : null,
+    d.by_port ? h("span", { title: t("gui-tracked-by-port-hint") }, t("gui-tracked-by-port")) : null,
     ...extra,
   );
+}
+
+// Short description of who may use a shared device.
+function accessLabel(d) {
+  if (d.open_to_all) return t("gui-access-everyone");
+  const n = (d.access && d.access.allowed && d.access.allowed.length) || 0;
+  return n ? t("gui-access-some", { count: n }) : t("gui-access-nobody");
 }
 
 // This computer: local devices and sharing.
 async function pageThis() {
   const devices = await api("local_devices");
   const rows = devices.map((d) => {
+    names.put("local", d.id, deviceName(d));
     const toggle = h("button", {
       class: "switch",
       role: "switch",
@@ -282,20 +302,29 @@ async function pageThis() {
       onclick: () =>
         act(async () => {
           toggle.disabled = true;
-          await api("set_shared", { busid: d.busid, shared: !d.shared });
+          await api("set_shared", { device: d.id, shared: !d.shared });
           await refresh();
         }),
     });
     let badge;
     if (d.used_by) badge = h("span", { class: "badge accent" }, t("gui-used-by", { name: d.used_by }));
+    else if (!d.present) badge = h("span", { class: "badge warn" }, t("gui-not-plugged-in"));
     else if (d.shared) badge = h("span", { class: "badge ok" }, t("gui-shared"));
     else badge = h("span", { class: "badge" }, t("gui-not-shared"));
+    const access = d.shared
+      ? h(
+          "button",
+          { class: "btn ghost small", title: t("gui-access-title"), onclick: () => act(() => accessDialog(d)) },
+          icon("shield"),
+          accessLabel(d),
+        )
+      : null;
     return h(
       "div",
-      { class: "row" },
-      h("div", { class: "tile" + (d.shared ? " on" : "") }, icon("usb")),
+      { class: "row" + (d.present ? "" : " absent") },
+      h("div", { class: "tile" + (d.shared && d.present ? " on" : "") }, icon("usb")),
       h("div", { class: "row-body" }, h("div", { class: "row-title" }, deviceName(d)), deviceMeta(d)),
-      h("div", { class: "row-end" }, badge, toggle),
+      h("div", { class: "row-end" }, access, badge, toggle),
     );
   });
   return [
@@ -348,6 +377,7 @@ async function showPin() {
     if (added) {
       close();
       toast(t("gui-pair-done", { name: added.name }));
+      if (s.policy === "restricted") await act(() => clientDevicesDialog(added, { afterPairing: true }));
       refresh();
     } else {
       pinEl.textContent = "— — —";
@@ -500,37 +530,47 @@ async function pageRemote() {
   const back = h("button", { class: "btn ghost", onclick: () => ((state.remote = null), render()) }, icon("back"), t("gui-back"));
   const devices = await api("remote_devices", { server: fingerprint });
   const rows = devices.map((d) => {
-    names.put(fingerprint, d.busid, deviceName(d));
+    names.put(fingerprint, d.id, deviceName(d));
     let end;
     if (d.attached_here) {
       end = [
-        h("span", { class: "badge ok" }, t("gui-connected-here")),
+        !d.allowed
+          ? h("span", { class: "badge danger", title: t("gui-no-permission-hint") }, t("gui-no-permission"))
+          : d.present
+            ? h("span", { class: "badge ok" }, t("gui-connected-here"))
+            : h("span", { class: "badge busy warn" }, t("gui-state-waiting-device")),
         h(
           "button",
-          { class: "btn", onclick: () => act(async () => (await api("detach", { server: fingerprint, busid: d.busid }), refresh())) },
+          { class: "btn", onclick: () => act(async () => (await api("detach", { server: fingerprint, device: d.id }), refresh())) },
           t("gui-disconnect"),
         ),
       ];
+    } else if (!d.allowed) {
+      end = h("span", { class: "badge danger", title: t("gui-no-permission-hint") }, t("gui-no-permission"));
     } else if (d.in_use) {
       end = h("span", { class: "badge warn" }, t("gui-in-use-elsewhere"));
     } else {
-      end = h(
-        "button",
-        {
-          class: "btn primary",
-          onclick: () =>
-            act(async () => {
-              await api("attach", { server: fingerprint, busid: d.busid });
-              toast(t("gui-state-connecting") + " " + deviceName(d));
-              setTimeout(refresh, 800);
-            }),
-        },
-        t("gui-connect"),
-      );
+      end = [
+        d.present ? null : h("span", { class: "badge warn" }, t("gui-not-plugged-in")),
+        h(
+          "button",
+          {
+            class: "btn primary",
+            title: d.present ? null : t("gui-connect-when-plugged-in"),
+            onclick: () =>
+              act(async () => {
+                await api("attach", { server: fingerprint, device: d.id });
+                toast(t("gui-state-connecting") + " " + deviceName(d));
+                setTimeout(refresh, 800);
+              }),
+          },
+          t("gui-connect"),
+        ),
+      ];
     }
     return h(
       "div",
-      { class: "row" },
+      { class: "row" + (d.present ? "" : " absent") },
       h("div", { class: "tile" + (d.attached_here ? " on" : "") }, icon("usb")),
       h("div", { class: "row-body" }, h("div", { class: "row-title" }, deviceName(d)), deviceMeta(d)),
       h("div", { class: "row-end" }, end),
@@ -548,6 +588,10 @@ function attachBadge(a) {
       return h("span", { class: "badge busy accent" }, t("gui-state-connecting"));
     case "retrying":
       return h("span", { class: "badge busy warn" }, t("gui-state-retrying", { seconds: a.seconds }));
+    case "waiting":
+      return a.error && a.error.code === "access_denied"
+        ? h("span", { class: "badge danger" }, t("gui-no-permission"))
+        : h("span", { class: "badge busy warn" }, t("gui-state-waiting-device"));
     case "stopped":
       return h("span", { class: "badge" }, t("gui-state-stopped"));
     default:
@@ -559,8 +603,8 @@ async function pageConnected() {
   const items = await api("attachments");
   state.attachmentsCount = items.filter((a) => a.state === "attached").length;
   const rows = items.map((a) => {
-    const title = names.get(a.server, a.busid) || t("gui-unnamed-device");
-    const again = () => act(async () => (await api("attach", { server: a.server, busid: a.busid }), refresh()));
+    const title = a.name || names.get(a.server, a.device) || t("gui-unnamed-device");
+    const again = () => act(async () => (await api("attach", { server: a.server, device: a.device }), refresh()));
     // Technical detail stays available as a tooltip.
     const detail =
       a.state === "failed"
@@ -580,7 +624,7 @@ async function pageConnected() {
           "div",
           { class: "row-meta" },
           h("span", {}, t("gui-on-computer", { name: a.server_name || shortFp(a.server) })),
-          h("span", { class: "mono" }, a.busid),
+          a.busid ? h("span", { class: "mono" }, a.busid) : null,
           a.vendor_id !== null && a.vendor_id !== undefined ? h("span", { class: "mono" }, `${hex4(a.vendor_id)}:${hex4(a.product_id)}`) : null,
         ),
         detail,
@@ -592,7 +636,7 @@ async function pageConnected() {
         a.state === "failed" || a.state === "stopped" ? h("button", { class: "btn", onclick: again }, t("gui-reconnect")) : null,
         h(
           "button",
-          { class: "btn", onclick: () => act(async () => (await api("detach", { server: a.server, busid: a.busid }), refresh())) },
+          { class: "btn", onclick: () => act(async () => (await api("detach", { server: a.server, device: a.device }), refresh())) },
           t("gui-disconnect"),
         ),
       ),
@@ -604,7 +648,7 @@ async function pageConnected() {
 // Paired computers in both directions.
 async function pagePaired() {
   const peers = await api("peers");
-  const section = (title, items) => [
+  const section = (title, items, isClient) => [
     h("h2", { class: "section-title" }, title),
     list(
       items.map((p) =>
@@ -623,7 +667,14 @@ async function pagePaired() {
               p.last_addr ? h("span", { class: "mono" }, p.last_addr) : null,
             ),
           ),
-          h("div", { class: "row-end" }, h("button", { class: "btn danger", onclick: () => confirmForget(p) }, t("gui-remove"))),
+          h(
+            "div",
+            { class: "row-end" },
+            isClient
+              ? h("button", { class: "btn", onclick: () => act(() => clientDevicesDialog(p)) }, icon("shield"), t("gui-client-devices"))
+              : null,
+            h("button", { class: "btn danger", onclick: () => confirmForget(p) }, t("gui-remove")),
+          ),
         ),
       ),
       t("gui-paired-empty"),
@@ -632,7 +683,7 @@ async function pagePaired() {
   return [
     pageHead(t("gui-paired-title"), t("gui-paired-subtitle")),
     ...section(t("gui-paired-servers"), peers.servers),
-    ...section(t("gui-paired-clients"), peers.clients),
+    ...section(t("gui-paired-clients"), peers.clients, true),
   ];
 }
 
@@ -661,6 +712,335 @@ function confirmForget(p) {
   ]);
 }
 
+// ---------------------------------------------------------------- access control
+
+function choice(name, value, checked, title, body) {
+  return h(
+    "label",
+    { class: "choice" },
+    h("input", { type: "radio", name, value, checked }),
+    h("span", {}, h("strong", {}, title), body ? h("small", {}, body) : null),
+  );
+}
+
+function checkedValue(form, name) {
+  const el = form.querySelector(`input[name="${name}"]:checked`);
+  return el ? el.value : null;
+}
+
+// Who may use one shared device.
+async function accessDialog(d) {
+  const [peers, status] = [await api("peers"), await api("status")];
+  const access = d.access || { mode: "default", allowed: [] };
+  const allowed = new Set(access.allowed || []);
+  const defaultText = status.policy === "open" ? t("gui-access-default-open") : t("gui-access-default-restricted");
+  const boxes = peers.clients.map((p) =>
+    h(
+      "label",
+      { class: "check" },
+      h("input", { type: "checkbox", value: p.fingerprint, checked: allowed.has(p.fingerprint) }),
+      h("span", {}, p.name),
+      h("span", { class: "mono muted" }, shortFp(p.fingerprint)),
+    ),
+  );
+  const listBox = h(
+    "div",
+    { class: "checks" },
+    h("div", { class: "checks-title" }, t("gui-access-computers")),
+    boxes.length ? boxes : h("div", { class: "muted" }, t("gui-paired-empty")),
+  );
+  const errorEl = h("div", { class: "form-error", role: "alert" });
+  const form = h(
+    "form",
+    {
+      onchange: () => update(),
+      onsubmit: async (e) => {
+        e.preventDefault();
+        errorEl.textContent = "";
+        try {
+          await api("set_device_access", {
+            device: d.id,
+            mode: checkedValue(form, "mode"),
+            allowed: [...form.querySelectorAll(".checks input:checked")].map((i) => i.value),
+          });
+          close();
+          refresh();
+        } catch (err) {
+          if (!(err instanceof ServiceDown)) errorEl.textContent = errorText(err);
+        }
+      },
+    },
+    h("h2", {}, t("gui-access-title")),
+    h("p", {}, deviceName(d)),
+    h(
+      "div",
+      { class: "choices" },
+      choice("mode", "default", access.mode === "default", t("gui-access-mode-default"), defaultText),
+      choice("mode", "open", access.mode === "open", t("gui-access-mode-open"), t("gui-access-mode-open-body")),
+      choice("mode", "selected", access.mode === "selected", t("gui-access-mode-selected"), t("gui-access-mode-selected-body")),
+    ),
+    listBox,
+    h("p", { class: "note" }, t("gui-access-revoke-note")),
+    errorEl,
+    h(
+      "div",
+      { class: "modal-actions" },
+      h("button", { class: "btn", type: "button", onclick: () => close() }, t("gui-cancel")),
+      h("button", { class: "btn primary", type: "submit" }, t("gui-save")),
+    ),
+  );
+  const update = () => {
+    const mode = checkedValue(form, "mode");
+    listBox.hidden = mode === "open" || (mode === "default" && status.policy === "open");
+  };
+  update();
+  const close = openModal(form);
+}
+
+// Which shared devices one computer may use (also shown right after pairing
+// when access is restricted).
+async function clientDevicesDialog(peer, { afterPairing = false } = {}) {
+  const devices = (await api("local_devices")).filter((d) => d.shared);
+  const rows = devices.map((d) => {
+    const mine = !!(d.access && (d.access.allowed || []).includes(peer.fingerprint));
+    return h(
+      "label",
+      { class: "check" },
+      h("input", {
+        type: "checkbox",
+        value: d.id,
+        checked: d.open_to_all || mine,
+        disabled: d.open_to_all,
+        "data-mine": mine ? "1" : null,
+      }),
+      h("span", {}, deviceName(d)),
+      d.open_to_all ? h("span", { class: "muted" }, t("gui-access-everyone")) : null,
+    );
+  });
+  const errorEl = h("div", { class: "form-error", role: "alert" });
+  const form = h(
+    "form",
+    {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        errorEl.textContent = "";
+        // Devices open to everyone keep whatever they had for this computer.
+        const chosen = [...form.querySelectorAll("input[type=checkbox]")]
+          .filter((i) => (i.disabled ? i.dataset.mine === "1" : i.checked))
+          .map((i) => i.value);
+        try {
+          await api("set_client_access", { fingerprint: peer.fingerprint, devices: chosen });
+          close();
+          refresh();
+        } catch (err) {
+          if (!(err instanceof ServiceDown)) errorEl.textContent = errorText(err);
+        }
+      },
+    },
+    h("h2", {}, t("gui-client-devices-title", { name: peer.name })),
+    h("p", {}, afterPairing ? t("gui-client-devices-after-pairing") : t("gui-client-devices-body")),
+    h("div", { class: "checks" }, rows.length ? rows : h("div", { class: "muted" }, t("gui-no-shared-devices"))),
+    errorEl,
+    h(
+      "div",
+      { class: "modal-actions" },
+      h("button", { class: "btn", type: "button", onclick: () => close() }, afterPairing ? t("gui-skip") : t("gui-cancel")),
+      h("button", { class: "btn primary", type: "submit" }, t("gui-save")),
+    ),
+  );
+  const close = openModal(form);
+}
+
+function policyChoices(current) {
+  return h(
+    "div",
+    { class: "choices" },
+    choice("policy", "open", current === "open", t("gui-policy-open"), t("gui-policy-open-body")),
+    choice("policy", "restricted", current === "restricted", t("gui-policy-restricted"), t("gui-policy-restricted-body")),
+  );
+}
+
+// First-run question: the default access policy.
+function policyDialog() {
+  const form = h(
+    "form",
+    {
+      onsubmit: (e) => {
+        e.preventDefault();
+        act(async () => {
+          await api("set_policy", { policy: checkedValue(form, "policy") });
+          close();
+          refresh();
+        });
+      },
+    },
+    h("h2", {}, t("gui-policy-first-title")),
+    h("p", {}, t("gui-policy-first-body")),
+    policyChoices("open"),
+    h("p", { class: "note" }, t("gui-policy-later")),
+    h("div", { class: "modal-actions" }, h("button", { class: "btn primary", type: "submit" }, t("gui-save"))),
+  );
+  const close = openModal(form);
+}
+
+// ---------------------------------------------------------------- history
+
+const HISTORY_KINDS = {
+  paired: "gui-history-paired",
+  pairing_failed: "gui-history-pairing-failed",
+  attached: "gui-history-attached",
+  detached: "gui-history-detached",
+  denied: "gui-history-denied",
+};
+
+function formatTime(unix) {
+  return new Date(unix * 1000).toLocaleString(state.lang || undefined);
+}
+
+function formatDuration(secs) {
+  if (secs === null || secs === undefined) return "";
+  const hh = Math.floor(secs / 3600);
+  const mm = Math.floor((secs % 3600) / 60);
+  const ss = String(secs % 60).padStart(2, "0");
+  return hh ? `${hh}:${String(mm).padStart(2, "0")}:${ss}` : `${mm}:${ss}`;
+}
+
+function historyDevice(e) {
+  return e.device_name || e.device || "";
+}
+
+function csvField(v) {
+  let s = v === null || v === undefined ? "" : String(v);
+  // Keep spreadsheets from running cell contents as formulas.
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",;\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+async function exportHistory() {
+  const view = await api("usage", {});
+  const header = [
+    "gui-history-time",
+    "gui-history-event",
+    "gui-history-computer",
+    "gui-address",
+    "gui-history-device",
+    "gui-history-device-id",
+    "gui-history-duration",
+    "gui-fingerprint",
+  ].map((k) => t(k));
+  const lines = [header];
+  for (const e of view.entries.slice().reverse()) {
+    lines.push([
+      new Date(e.time * 1000).toISOString(),
+      t(HISTORY_KINDS[e.kind] || e.kind),
+      e.computer,
+      e.address,
+      e.device_name,
+      e.device,
+      e.duration_secs,
+      e.fingerprint,
+    ]);
+  }
+  // A byte order mark lets spreadsheet programs detect UTF-8.
+  const csv = "\ufeff" + lines.map((l) => l.map(csvField).join(",")).join("\r\n") + "\r\n";
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const a = h("a", { href: url, download: `usbnexus-history-${new Date().toISOString().slice(0, 10)}.csv` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function pageHistory() {
+  const view = await api("usage", { limit: 500 });
+  const rows = view.entries.map((e) => {
+    const bad = e.kind === "denied" || e.kind === "pairing_failed";
+    return h(
+      "tr",
+      { class: bad ? "bad" : null },
+      h("td", { class: "nowrap" }, formatTime(e.time)),
+      h("td", {}, t(HISTORY_KINDS[e.kind] || e.kind)),
+      h("td", { title: e.fingerprint ? shortFp(e.fingerprint) : null }, e.computer || "", e.address ? h("div", { class: "muted mono" }, e.address) : null),
+      h("td", { title: e.device || null }, historyDevice(e)),
+      h("td", { class: "nowrap" }, formatDuration(e.duration_secs)),
+    );
+  });
+  const table = rows.length
+    ? h(
+        "div",
+        { class: "list table-wrap" },
+        h(
+          "table",
+          { class: "table" },
+          h(
+            "thead",
+            {},
+            h(
+              "tr",
+              {},
+              ...["gui-history-time", "gui-history-event", "gui-history-computer", "gui-history-device", "gui-history-duration"].map((k) =>
+                h("th", {}, t(k)),
+              ),
+            ),
+          ),
+          h("tbody", {}, rows),
+        ),
+      )
+    : list([], t("gui-history-empty"));
+  return [
+    pageHead(
+      t("gui-history-title"),
+      t("gui-history-subtitle", { days: view.retention_days }),
+      h("button", { class: "btn", onclick: () => act(exportHistory), disabled: !rows.length }, icon("download"), t("gui-history-export")),
+    ),
+    table,
+  ];
+}
+
+// ---------------------------------------------------------------- settings
+
+async function pageSettings() {
+  const [status, usage] = [await api("status"), await api("usage", { limit: 0 })];
+  const policyForm = h(
+    "form",
+    {
+      class: "card",
+      onsubmit: (e) => {
+        e.preventDefault();
+        act(async () => {
+          await api("set_policy", { policy: checkedValue(policyForm, "policy") });
+          toast(t("gui-saved"));
+          state.status = await api("status");
+        });
+      },
+    },
+    h("h2", {}, t("gui-policy-title")),
+    h("p", {}, t("gui-policy-body")),
+    policyChoices(status.policy),
+    h("p", { class: "note" }, t("gui-access-revoke-note")),
+    h("div", { class: "modal-actions" }, h("button", { class: "btn primary", type: "submit" }, t("gui-save"))),
+  );
+  const days = h("input", { type: "number", min: "1", max: "3650", value: String(usage.retention_days), required: true });
+  const retentionForm = h(
+    "form",
+    {
+      class: "card",
+      onsubmit: (e) => {
+        e.preventDefault();
+        act(async () => {
+          await api("set_usage_retention", { days: Number(days.value) });
+          toast(t("gui-saved"));
+        });
+      },
+    },
+    h("h2", {}, t("gui-retention-title")),
+    h("p", {}, t("gui-retention-body")),
+    h("label", { class: "field" }, t("gui-retention-days"), days),
+    h("div", { class: "modal-actions" }, h("button", { class: "btn primary", type: "submit" }, t("gui-save"))),
+  );
+  return [pageHead(t("gui-settings-title"), null), policyForm, retentionForm];
+}
+
 function pageServiceDown() {
   return h(
     "div",
@@ -682,7 +1062,14 @@ function pageServiceDown() {
 
 // ---------------------------------------------------------------- render loop
 
-const PAGES = { this: pageThis, network: pageNetwork, connected: pageConnected, paired: pagePaired };
+const PAGES = {
+  this: pageThis,
+  network: pageNetwork,
+  connected: pageConnected,
+  paired: pagePaired,
+  history: pageHistory,
+  settings: pageSettings,
+};
 
 let renderSeq = 0;
 
@@ -714,8 +1101,13 @@ async function refresh() {
   } catch {
     /* handled by api() */
   }
-  // Network discovery is refreshed on demand only.
-  if (state.view === "network" && !state.remote && !state.serviceDown) {
+  // First run: ask who may use shared devices (once per window).
+  if (state.status && !state.status.policy_chosen && !state.policyAsked && document.getElementById("modal").hidden) {
+    state.policyAsked = true;
+    policyDialog();
+  }
+  // Network discovery is refreshed on demand only; forms are not redrawn.
+  if (((state.view === "network" && !state.remote) || state.view === "settings") && !state.serviceDown) {
     renderSidebar();
     return;
   }

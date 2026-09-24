@@ -89,6 +89,7 @@ pub fn read_device(sys: &Path, busid: &str) -> Result<LocalDevice> {
         },
         product: read_attr(&dir, "product"),
         manufacturer: read_attr(&dir, "manufacturer"),
+        serial: read_attr(&dir, "serial"),
         driver,
     })
 }
@@ -142,20 +143,23 @@ impl LinuxHost {
         sysfs_write(&stub.join("bind"), busid)
     }
 
-    /// Returns a device to its normal driver.
+    /// Returns a device to its normal driver, and makes `usbip-host` forget
+    /// the port, so a device plugged in there later keeps its normal driver
+    /// (also when the shared device was unplugged or moved to another port).
     pub fn unbind(&self, busid: &str) -> Result<()> {
-        let Ok(dev) = read_device(&self.sys, busid) else {
-            // Unplugged: nothing to give back.
-            return Ok(());
-        };
-        let current = dev.driver;
-        if current.as_deref() != Some(STUB_DRIVER) {
-            return Ok(());
-        }
         let stub = self.stub_dir();
-        sysfs_write(&stub.join("unbind"), busid)?;
-        sysfs_write(&stub.join("match_busid"), &format!("del {busid}"))?;
-        sysfs_write(&self.sys.join("bus/usb/drivers_probe"), busid)
+        let bound = read_device(&self.sys, busid).is_ok_and(|d| d.driver.as_deref() == Some(STUB_DRIVER));
+        if bound {
+            sysfs_write(&stub.join("unbind"), busid)?;
+        }
+        if stub.exists() {
+            // Fails when the port is not in the list; nothing to do then.
+            let _ = sysfs_write(&stub.join("match_busid"), &format!("del {busid}"));
+        }
+        if bound {
+            sysfs_write(&self.sys.join("bus/usb/drivers_probe"), busid)?;
+        }
+        Ok(())
     }
 }
 
@@ -286,7 +290,9 @@ impl LinuxImport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{ExportBackend, SharedExport};
+    use crate::access::Policy;
+    use crate::backend::{ExportBackend, SharedDevice, SharedExport};
+    use crate::device_id::DeviceId;
     use std::sync::Arc;
 
     fn fake_device(sys: &Path, busid: &str) {
@@ -307,6 +313,7 @@ mod tests {
             ("bNumInterfaces", " 1"),
             ("product", "Cruzer Blade"),
             ("manufacturer", "SanDisk"),
+            ("serial", "4C5300"),
             ("usbip_status", "1"),
         ] {
             fs::write(d.join(k), format!("{v}\n")).unwrap();
@@ -335,10 +342,34 @@ mod tests {
         assert_eq!(d.info.interfaces, vec![InterfaceInfo { class: 8, subclass: 6, protocol: 0x50 }]);
         assert_eq!(d.product.as_deref(), Some("Cruzer Blade"));
 
-        let shared = SharedExport::new(Arc::new(LinuxHost::new(tmp.path())), ["1-2".into(), "9-9".into()]);
-        assert_eq!(shared.list().unwrap().len(), 1, "missing devices are skipped");
+        assert_eq!(d.serial.as_deref(), Some("4C5300"));
+
+        let entries = ["1-2", "9-9"].map(|b| SharedDevice::new(DeviceId::parse(b)));
+        let shared = SharedExport::new(Arc::new(LinuxHost::new(tmp.path())), entries, Policy::Open);
+        let offered = shared.list().unwrap();
+        assert_eq!(offered.iter().filter(|o| o.device.is_some()).count(), 1, "missing devices are not plugged in");
+        assert!(shared.refresh().unwrap());
+        assert_eq!(shared.shared()[0].id.to_string(), "0781:5567:4C5300", "bus id replaced by the identity");
         let refused = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(shared.export("3-3"));
         assert!(refused.is_err(), "unshared devices are refused");
+    }
+
+    #[test]
+    fn ports_left_by_shared_devices_are_released() {
+        let tmp = tempfile::tempdir().unwrap();
+        fake_device(tmp.path(), "1-2");
+        let stub = tmp.path().join("bus/usb/drivers/usbip-host");
+        fs::create_dir_all(&stub).unwrap();
+        fs::write(stub.join("match_busid"), "").unwrap();
+        let entries = [SharedDevice::new(DeviceId::parse("0781:5567:4C5300"))];
+        let shared = SharedExport::new(Arc::new(LinuxHost::new(tmp.path())), entries, Policy::Open);
+        shared.refresh().unwrap();
+        assert_eq!(fs::read_to_string(stub.join("match_busid")).unwrap(), "");
+
+        // Unplugged: usbip-host must not keep claiming port 1-2.
+        fs::remove_dir_all(tmp.path().join("bus/usb/devices/1-2")).unwrap();
+        shared.refresh().unwrap();
+        assert_eq!(fs::read_to_string(stub.join("match_busid")).unwrap(), "del 1-2");
     }
 
     #[test]

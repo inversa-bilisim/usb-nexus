@@ -24,7 +24,7 @@ owner's company account later (only `Cargo.toml` `repository` needs changing).
 | Path | What |
 |---|---|
 | `crates/usbnexus-proto` | USB/IP wire format (op + URB messages) |
-| `crates/usbnexus-core` | TLS tunnel, pairing (SPAKE2), trust stores, discovery, client/server, daemon + local API, web UI, platform backends |
+| `crates/usbnexus-core` | TLS tunnel, pairing (SPAKE2), trust stores, discovery, client/server, daemon + local API, device identities, access control, usage log, web UI, platform backends |
 | `crates/usbnexus-i18n` | Fluent translations, `t!` macro, templates for the UIs |
 | `crates/usbnexus-cli` | `usbnexus` binary (CLI, daemon, Windows service) |
 | `apps/desktop` | Tauri 2 app; `ui/` is plain HTML/CSS/JS shared with the web UI (`web.js` = browser shim) |
@@ -49,38 +49,38 @@ cargo test --workspace
 node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
 ```
 
-## Agreed next features (approved, not implemented yet)
+## Implemented features (keep in mind when changing related code)
 
-### 1. Hotplug-tolerant sharing and attaching
-- Identify shared devices by **VID:PID + serial number** instead of bus id,
-  so a device keeps being shared on any port. Devices **without a serial**
-  stay tracked by port; the UI notes "tracked by port".
-- A shared device that is unplugged stays listed as "not plugged in" and is
-  shared again automatically when it returns.
-- Clients key attachments by server + device identity; if the device is
-  missing they stay in a "waiting for device" state and keep retrying
-  (today `NoSuchDevice` is treated as permanent – change that).
-- Server detects changes by polling the device list every few seconds
-  (all platforms); push notifications can come later.
-- Migrate existing configs keyed by bus id automatically.
+### Hotplug-tolerant sharing and attaching
+- `device_id.rs`: `DeviceId` = `vid:pid:serial`, or `vid:pid@busid` for
+  devices without a (usable) serial ("tracked by port"), or a bare bus id
+  from older configs (`Legacy`, migrated as soon as the device is seen).
+- `backend::SharedExport` stores `SharedDevice`s (id, last known names,
+  access) and resolves them against `DeviceHost::list_all()`. Unplugged
+  shared devices are still offered (`Offered::device == None`, protocol
+  `ExportedDevice::present == false`).
+- The daemon polls every 3 s (`poll_devices`): remembers names, migrates
+  legacy ids and releases ports a shared device left (Linux: removes the
+  stale `usbip-host` `match_busid` entry).
+- Clients key attachments by (server fingerprint, device id).
+  `NoSuchDevice` and `AccessDenied` are not permanent: `AttachState::Waiting`,
+  retried every ≤5 s (missing device) or with backoff (no permission).
+  An attachment saved by bus id is re-keyed when the server reports the id
+  (`ServerMsg::Imported::id`).
 
-### 2. Access control and usage log
-- Identity is per **computer** (paired certificate), not per person.
-- Server-wide default policy: **open** (every paired computer may use every
-  shared device – current behaviour) or **restricted** (only allowed
-  computers). Pairing stays mandatory in both.
-- Per-device override: follow default / open / only selected computers.
-- First run of the desktop app or web UI asks which default to use;
-  changeable later in settings and with `usbnexus policy open|restricted`.
-  Headless installs default to **open**.
-- Computers without permission still **see** restricted devices, marked
-  "no permission".
-- Revoking permission **disconnects** an active session immediately.
-- With a restricted default, the server's PIN dialog also lets the admin
-  choose which devices the new computer may use (none if skipped).
-- Usage log on the server: pairings, failed PIN attempts, attach/detach
-  (computer, device, duration), denied attempts. "History" page in the UI,
-  CSV export, retention **90 days** (configurable), capped at 10 MB.
+### Access control and usage log
+- `access.rs`: `Policy` (open/restricted, `None` in config until chosen →
+  open) and per-device `DeviceAccess` (default/open/selected + allowed
+  fingerprints; one list shared by "restricted default" and "selected").
+- Server checks `Offered::allowed` on import (`ErrorCode::AccessDenied`) and
+  marks listings (`allowed`). `Server::enforce()` disconnects sessions no
+  longer allowed (called after every sharing/access change and `forget`).
+- API: `set_policy`, `set_device_access`, `set_client_access`, `usage`,
+  `set_usage_retention`; `status.policy_chosen` drives the first-run dialog.
+  CLI: `usbnexus policy [open|restricted]`, `usbnexus history [--csv]`.
+- `usage.rs`: JSON lines in `usage.log`, retention 90 days (configurable),
+  capped at 10 MB. Repeated refusals of one device to one computer are
+  logged once per hour.
 
 ## Pending end-to-end tests (to run with real hardware)
 
@@ -94,3 +94,12 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
 8. `.rpm` on Fedora/openSUSE; systemd service actually starting (not verified in the container).
 9. Release workflow with a test tag.
 10. Web UI with `web enable --lan` from another computer (e.g. Raspberry Pi server).
+11. Hotplug: unplug a shared/attached device and plug it into another port
+    (Linux, Windows/VBoxUSB, macOS/libusb); the client must re-attach by
+    itself. Check that a device without a serial is tracked by port and that
+    no port stays reserved by `usbip-host` afterwards.
+12. Serial numbers on Windows (hub string descriptor) and macOS (libusb;
+    devices macOS will not open have no serial and are tracked by port).
+    Check whether a device captured by VBoxUSB still shows up in the list.
+13. Access control across machines: restricted policy, revoke while in use
+    (the client's virtual device must disappear), history and CSV export.

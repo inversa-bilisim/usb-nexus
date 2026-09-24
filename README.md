@@ -120,6 +120,41 @@ Bağlantı TLS 1.3 ile şifrelenir. İki taraf da birbirini PIN ile eşleştirme
 parmak iziyle doğrular. Sunucunun IP adresi değişse bile istemci onu yerel ağda (mDNS) parmak izinden
 yeniden bulur.
 
+### Takılıp çıkarılan cihazlar
+
+Paylaşılan cihazlar bağlantı noktasıyla değil **VID:PID + seri numarasıyla** tanınır; cihaz hangi USB
+bağlantı noktasına takılırsa takılsın paylaşılmaya devam eder. Seri numarası olmayan cihazlar
+bağlantı noktasından izlenir (arayüzde “bağlantı noktasıyla izleniyor” notu görünür).
+
+- Çıkarılan paylaşılmış cihaz listede “takılı değil” olarak kalır, geri takılınca yeniden paylaşılır.
+- İstemci cihaz yoksa “cihaz bekleniyor” durumunda kalır ve cihaz takılınca kendiliğinden bağlanır.
+- Sunucu cihaz listesini birkaç saniyede bir yoklar. Eski (bus id ile kaydedilmiş) ayarlar kendiliğinden taşınır.
+
+```sh
+sudo usbnexus local                                   # CİHAZ KİMLİĞİ sütunu: 0781:5567:4C5300…
+sudo usbnexus attach ofis-pc 0781:5567:4C5300…        # kimlikle (bus id de kabul edilir)
+```
+
+### Erişim denetimi ve kullanım kaydı
+
+Kimlik bilgisayar başınadır (eşleştirilmiş sertifika). Eşleştirme her zaman gereklidir; üstüne:
+
+- **açık** (varsayılan): eşleştirilmiş her bilgisayar paylaşılan her cihazı kullanabilir;
+- **kısıtlı**: her cihaz için yalnızca izin verilen bilgisayarlar kullanabilir.
+
+Her cihaz bu varsayılanı değiştirebilir (varsayılanı izle / herkes / yalnızca seçili bilgisayarlar).
+Masaüstü uygulaması ve web arayüzü ilk açılışta hangisinin kullanılacağını sorar; ekransız
+kurulumlarda varsayılan **açık**tır. İzni olmayan bilgisayarlar cihazı “izin yok” olarak görür; izin
+kaldırıldığında etkin bağlantı hemen kesilir.
+
+```sh
+sudo usbnexus policy restricted     # veya: open; parametresiz çalıştırınca mevcut ayarı gösterir
+sudo usbnexus history               # eşleştirmeler, yanlış PIN'ler, kullanım, reddedilen istekler
+sudo usbnexus history --csv > kayit.csv
+```
+
+Kullanım kaydı `usage.log` dosyasında tutulur: 90 gün (Ayarlar'dan değiştirilebilir), en fazla 10 MB.
+
 ## Platform yol haritası
 
 | Senaryo | Sürücü | Durum |

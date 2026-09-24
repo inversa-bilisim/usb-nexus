@@ -9,9 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::access::{DeviceAccess, DeviceMode, Policy};
 use crate::client::ClientError;
 use crate::control::RemoteError;
 use crate::trust::Peer;
+use crate::usage::UsageEntry;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -19,9 +21,38 @@ pub enum Request {
     Status,
     /// USB devices of this computer, with their sharing state.
     LocalDevices,
+    /// `device` is a device identity (`id` of a [`LocalDeviceView`]) or a
+    /// bus id of a connected device.
     SetShared {
-        busid: String,
+        #[serde(alias = "busid")]
+        device: String,
         shared: bool,
+    },
+    /// Chooses the server-wide access policy.
+    SetPolicy {
+        policy: Policy,
+    },
+    /// Changes who may use a shared device; `allowed` (fingerprints) is
+    /// left unchanged when omitted.
+    SetDeviceAccess {
+        device: String,
+        mode: DeviceMode,
+        #[serde(default)]
+        allowed: Option<Vec<String>>,
+    },
+    /// Lets a paired computer use exactly `devices` among the shared devices
+    /// whose access is limited to selected computers.
+    SetClientAccess {
+        fingerprint: String,
+        devices: Vec<String>,
+    },
+    /// Usage log, newest entries first.
+    Usage {
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    SetUsageRetention {
+        days: u32,
     },
     OpenPairing {
         seconds: u64,
@@ -38,13 +69,16 @@ pub enum Request {
     RemoteDevices {
         server: String,
     },
+    /// `device` is a device identity (`id` of a [`RemoteDeviceView`]).
     Attach {
         server: String,
-        busid: String,
+        #[serde(alias = "busid")]
+        device: String,
     },
     Detach {
         server: String,
-        busid: String,
+        #[serde(alias = "busid")]
+        device: String,
     },
     Attachments,
     Peers,
@@ -136,17 +170,34 @@ pub struct StatusView {
     pub version: String,
     pub listen: String,
     pub pairing: Option<PairingView>,
+    /// Server-wide access policy.
+    pub policy: Policy,
+    /// Whether the policy was chosen explicitly (user interfaces ask on
+    /// first run otherwise).
+    pub policy_chosen: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalDeviceView {
-    pub busid: String,
+    /// Device identity; use it to refer to the device in requests.
+    pub id: String,
+    /// Current bus id (none while unplugged).
+    pub busid: Option<String>,
     pub vendor_id: u16,
     pub product_id: u16,
     pub product: Option<String>,
     pub manufacturer: Option<String>,
+    /// Empty while unplugged.
     pub speed: String,
+    /// Whether the device is plugged in (shared devices stay listed).
+    pub present: bool,
+    /// The device has no serial number, so it is recognised by its port.
+    pub by_port: bool,
     pub shared: bool,
+    /// Access settings of a shared device.
+    pub access: Option<DeviceAccess>,
+    /// Whether every paired computer may use the (shared) device.
+    pub open_to_all: bool,
     /// Name of the client currently using the device.
     pub used_by: Option<String>,
 }
@@ -161,12 +212,20 @@ pub struct DiscoveredView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteDeviceView {
-    pub busid: String,
+    /// Device identity; use it to attach.
+    pub id: String,
+    /// Current bus id on the server (none while unplugged).
+    pub busid: Option<String>,
     pub vendor_id: u16,
     pub product_id: u16,
     pub product: Option<String>,
     pub manufacturer: Option<String>,
     pub speed: String,
+    /// Whether the device is plugged in on the server.
+    pub present: bool,
+    /// Whether this computer may use it.
+    pub allowed: bool,
+    pub by_port: bool,
     /// Used by some computer (possibly this one).
     pub in_use: bool,
     /// Attached (or being attached) on this computer.
@@ -185,6 +244,13 @@ pub enum AttachState {
         seconds: u64,
         error: ApiError,
     },
+    /// The device is not plugged in on the server (`error.code` is
+    /// `no_such_device`) or this computer may not use it (`access_denied`);
+    /// asking again in `seconds`.
+    Waiting {
+        seconds: u64,
+        error: ApiError,
+    },
     /// Detached on this computer (device removed or detached by the OS).
     Stopped,
     Failed {
@@ -196,7 +262,13 @@ pub enum AttachState {
 pub struct AttachmentView {
     pub server: String,
     pub server_name: String,
-    pub busid: String,
+    /// Device identity on the server (a bus id for attachments saved by
+    /// older versions, until the device is seen).
+    pub device: String,
+    /// Bus id on the server when last attached.
+    pub busid: Option<String>,
+    /// Device name, once the server's device list was seen.
+    pub name: Option<String>,
     pub vendor_id: Option<u16>,
     pub product_id: Option<u16>,
     #[serde(flatten)]
@@ -215,6 +287,13 @@ pub struct WebStatusView {
     pub fingerprint: Option<String>,
     /// Why the interface is not running although enabled.
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageView {
+    /// Newest first.
+    pub entries: Vec<UsageEntry>,
+    pub retention_days: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -424,12 +503,17 @@ mod tests {
 
     #[test]
     fn wire_format() {
+        // Older clients send bus ids.
         let r: Request = serde_json::from_str(r#"{"cmd":"set_shared","busid":"1-2","shared":true}"#).unwrap();
-        assert_eq!(r, Request::SetShared { busid: "1-2".into(), shared: true });
+        assert_eq!(r, Request::SetShared { device: "1-2".into(), shared: true });
+        let r: Request = serde_json::from_str(r#"{"cmd":"set_policy","policy":"restricted"}"#).unwrap();
+        assert_eq!(r, Request::SetPolicy { policy: Policy::Restricted });
         let v = serde_json::to_value(AttachmentView {
             server: "fp".into(),
             server_name: "pc".into(),
-            busid: "1-2".into(),
+            device: "0781:5567:X".into(),
+            busid: Some("1-2".into()),
+            name: None,
             vendor_id: None,
             product_id: None,
             state: AttachState::Attached { port: 3 },

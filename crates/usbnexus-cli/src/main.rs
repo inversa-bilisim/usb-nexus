@@ -20,6 +20,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use usbnexus_core::client::{self, AttachEvent, ClientConfig, ClientError, Target};
+use usbnexus_core::device_id::DeviceId;
 use usbnexus_core::identity::{short_fingerprint, Identity};
 use usbnexus_core::trust::TrustStore;
 use usbnexus_core::{discovery, DEFAULT_PORT};
@@ -84,6 +85,12 @@ enum ServiceCmd {
     Run,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum PolicyArg {
+    Open,
+    Restricted,
+}
+
 #[derive(Subcommand)]
 enum WebCmd {
     Enable {
@@ -129,9 +136,19 @@ enum Cmd {
     },
     Attach {
         server: String,
-        busid: String,
+        device: String,
     },
     Peers,
+    Policy {
+        #[arg(value_enum)]
+        policy: Option<PolicyArg>,
+    },
+    History {
+        #[arg(long)]
+        csv: bool,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     Forget {
         peer: String,
     },
@@ -288,8 +305,10 @@ async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Discover { timeout } => discover(ctx, timeout).await,
         Cmd::Pair { server, pin } => pair(ctx, &server, pin).await,
         Cmd::List { server } => list(ctx, &server).await,
-        Cmd::Attach { server, busid } => attach(ctx, &server, &busid).await,
+        Cmd::Attach { server, device } => attach(ctx, &server, &device).await,
         Cmd::Peers => peers(ctx),
+        Cmd::Policy { policy } => policy_cmd(ctx, policy).await,
+        Cmd::History { csv, limit } => history(ctx, csv, limit).await,
         Cmd::Forget { peer } => forget(ctx, &peer),
         Cmd::Api { request } => {
             let req: usbnexus_core::api::Request = serde_json::from_str(&request).context("parsing request")?;
@@ -400,11 +419,17 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
     use usbnexus_core::server::ServerEvent;
 
     let (host, import) = backends(&opts)?;
-    let events = Arc::new(|ev: ServerEvent| match ev {
+    let label = |u: &usbnexus_core::server::DeviceUse| u.device_name.clone().unwrap_or_else(|| u.device.clone());
+    let events = Arc::new(move |ev: ServerEvent| match ev {
         ServerEvent::Paired { name, .. } => println!("{}", t!("serve-paired", name = name)),
-        ServerEvent::PairingFailed { addr } => println!("{}", t!("serve-pairing-failed", addr = addr.to_string())),
-        ServerEvent::Exported { busid, client } => println!("{}", t!("serve-exported", busid = busid, client = client)),
-        ServerEvent::Released { busid, client } => println!("{}", t!("serve-released", busid = busid, client = client)),
+        ServerEvent::PairingFailed { addr, .. } => {
+            println!("{}", t!("serve-pairing-failed", addr = addr.to_string()))
+        }
+        ServerEvent::Exported(u) => println!("{}", t!("serve-exported", busid = label(&u), client = u.client)),
+        ServerEvent::Released { usage: u, .. } => {
+            println!("{}", t!("serve-released", busid = label(&u), client = u.client))
+        }
+        ServerEvent::Denied(u) => println!("{}", t!("serve-denied", busid = label(&u), client = u.client)),
     });
     let d = Daemon::start(DaemonOptions {
         state_dir: ctx.dir.clone(),
@@ -418,7 +443,7 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
     .await?;
 
     for busid in &opts.export {
-        if let Response::Error { error } = d.handle(Request::SetShared { busid: busid.clone(), shared: true }).await {
+        if let Response::Error { error } = d.handle(Request::SetShared { device: busid.clone(), shared: true }).await {
             eprintln!("{}", t!("serve-bind-failed", busid = busid.as_str(), detail = error.message));
         }
     }
@@ -433,7 +458,7 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
             .filter(|v| v.shared)
             .map(|v| {
                 vec![
-                    v.busid,
+                    v.busid.unwrap_or_else(|| t!("state-unplugged")),
                     format!("{}:{}", hex4(v.vendor_id), hex4(v.product_id)),
                     [v.manufacturer, v.product].into_iter().flatten().collect::<Vec<_>>().join(" "),
                 ]
@@ -535,12 +560,16 @@ fn local() -> Result<()> {
                 d.info.busid.clone(),
                 format!("{}:{}", hex4(d.info.id_vendor), hex4(d.info.id_product)),
                 d.info.speed.label().to_string(),
-                d.driver.unwrap_or_else(|| "-".into()),
-                [d.manufacturer, d.product].into_iter().flatten().collect::<Vec<_>>().join(" "),
+                d.driver.clone().unwrap_or_else(|| "-".into()),
+                [d.manufacturer.clone(), d.product.clone()].into_iter().flatten().collect::<Vec<_>>().join(" "),
+                DeviceId::of(&d).to_string(),
             ]
         })
         .collect();
-    ui::table(&[t!("col-busid"), t!("col-id"), t!("col-speed"), t!("col-driver"), t!("col-product")], &rows);
+    ui::table(
+        &[t!("col-busid"), t!("col-id"), t!("col-speed"), t!("col-driver"), t!("col-product"), t!("col-device-id")],
+        &rows,
+    );
     Ok(())
 }
 
@@ -628,21 +657,35 @@ async fn list(ctx: &Ctx, server: &str) -> Result<()> {
     let rows: Vec<Vec<String>> = devices
         .into_iter()
         .map(|d| {
+            let state = if !d.allowed {
+                t!("state-no-permission")
+            } else if !d.present {
+                t!("state-unplugged")
+            } else if d.in_use {
+                t!("list-in-use")
+            } else {
+                String::new()
+            };
+            let id = if d.id.is_empty() { d.info.busid.clone() } else { d.id };
             vec![
-                d.info.busid.clone(),
+                if d.present { d.info.busid } else { "-".into() },
                 format!("{}:{}", hex4(d.info.id_vendor), hex4(d.info.id_product)),
-                d.info.speed.label().to_string(),
+                if d.present { d.info.speed.label().to_string() } else { String::new() },
                 [d.manufacturer, d.product].into_iter().flatten().collect::<Vec<_>>().join(" "),
-                if d.in_use { t!("list-in-use") } else { String::new() },
+                state,
+                id,
             ]
         })
         .collect();
-    ui::table(&[t!("col-busid"), t!("col-id"), t!("col-speed"), t!("col-product"), t!("col-state")], &rows);
+    ui::table(
+        &[t!("col-busid"), t!("col-id"), t!("col-speed"), t!("col-product"), t!("col-state"), t!("col-device-id")],
+        &rows,
+    );
     Ok(())
 }
 
 #[cfg(any(target_os = "linux", windows))]
-async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
+async fn attach(ctx: &Ctx, server: &str, device: &str) -> Result<()> {
     let cfg = ctx.client_config()?;
     let target = Target::parse(server, &cfg.trust);
     #[cfg(target_os = "linux")]
@@ -652,13 +695,24 @@ async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
     };
     #[cfg(windows)]
     let backend = Arc::new(usbnexus_core::windows::WindowsImport::default());
+    // Waiting for a device is reported once, not on every attempt.
+    let waiting = std::cell::Cell::new(false);
     let events = |ev: AttachEvent| match ev {
+        AttachEvent::Connecting { .. } if waiting.get() => {}
         AttachEvent::Connecting { addr } => println!("{}", t!("attach-connecting", addr = addr)),
+        AttachEvent::Retrying { .. } if waiting.get() => {}
         AttachEvent::Attached { port, .. } => {
-            println!("{}", t!("attach-attached", busid = busid, port = port));
+            waiting.set(false);
+            println!("{}", t!("attach-attached", busid = device, port = port));
             println!("{}", t!("attach-stop-hint"));
         }
+        AttachEvent::Disconnected { error } if error.code == "no_such_device" => {
+            if !waiting.replace(true) {
+                println!("{}", t!("attach-waiting-device"));
+            }
+        }
         AttachEvent::Disconnected { error } => {
+            waiting.set(false);
             let reason = ui::describe(&error.clone().into(), None);
             println!("{}", t!("attach-disconnected", reason = reason));
         }
@@ -666,7 +720,7 @@ async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
         AttachEvent::Detached => println!("{}", t!("attach-detached")),
     };
     tokio::select! {
-        r = client::attach_forever(&cfg, &target, busid, backend, events) => r,
+        r = client::attach_forever(&cfg, &target, device, backend, events) => r,
         _ = shutdown_signal() => {
             // Dropping the relay closes the socket; the kernel detaches the device.
             println!("{}", t!("attach-detached"));
@@ -779,5 +833,90 @@ fn forget(ctx: &Ctx, peer: &str) -> Result<()> {
         Some(name) => println!("{}", t!("forget-ok", name = name)),
         None => bail!(t!("forget-unknown", peer = peer)),
     }
+    Ok(())
+}
+
+async fn policy_cmd(ctx: &Ctx, policy: Option<PolicyArg>) -> Result<()> {
+    use usbnexus_core::access::Policy;
+    use usbnexus_core::api::{self, Request, StatusView};
+    if let Some(p) = policy {
+        let policy = match p {
+            PolicyArg::Open => Policy::Open,
+            PolicyArg::Restricted => Policy::Restricted,
+        };
+        api::call::<()>(&ctx.socket, &Request::SetPolicy { policy }).await?;
+    }
+    let status: StatusView = api::call(&ctx.socket, &Request::Status).await?;
+    println!(
+        "{}",
+        match status.policy {
+            Policy::Open => t!("policy-open"),
+            Policy::Restricted => t!("policy-restricted"),
+        }
+    );
+    Ok(())
+}
+
+async fn history(ctx: &Ctx, csv: bool, limit: usize) -> Result<()> {
+    use usbnexus_core::api::{self, Request, UsageView};
+    use usbnexus_core::usage::{csv_field, format_utc, UsageKind};
+    let limit = if csv { None } else { Some(limit) };
+    let view: UsageView = api::call(&ctx.socket, &Request::Usage { limit }).await?;
+    let kind = |k: UsageKind| match k {
+        UsageKind::Paired => t!("history-paired"),
+        UsageKind::PairingFailed => t!("history-pairing-failed"),
+        UsageKind::Attached => t!("history-attached"),
+        UsageKind::Detached => t!("history-detached"),
+        UsageKind::Denied => t!("history-denied"),
+    };
+    let headers = [
+        t!("col-time"),
+        t!("col-event"),
+        t!("col-computer"),
+        t!("col-address"),
+        t!("col-product"),
+        t!("col-device-id"),
+        t!("col-duration"),
+        t!("col-fingerprint"),
+    ];
+    let rows: Vec<Vec<String>> = view
+        .entries
+        .into_iter()
+        .map(|e| {
+            vec![
+                format_utc(e.time),
+                kind(e.kind),
+                e.computer.unwrap_or_default(),
+                e.address.unwrap_or_default(),
+                e.device_name.unwrap_or_default(),
+                e.device.unwrap_or_default(),
+                e.duration_secs.map(|s| s.to_string()).unwrap_or_default(),
+                e.fingerprint.unwrap_or_default(),
+            ]
+        })
+        .collect();
+    if csv {
+        // Oldest first, like a log file.
+        let line = |cells: &[String]| cells.iter().map(|c| csv_field(c)).collect::<Vec<_>>().join(",");
+        println!("{}", line(&headers));
+        for r in rows.iter().rev() {
+            println!("{}", line(r));
+        }
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("{}", t!("history-empty"));
+        return Ok(());
+    }
+    println!("{}", t!("history-header", days = view.retention_days));
+    let short: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|mut r| {
+            r.truncate(7);
+            r[6] = r[6].parse::<u64>().map(ui::duration).unwrap_or_default();
+            r
+        })
+        .collect();
+    ui::table(&headers[..7], &short);
     Ok(())
 }

@@ -99,9 +99,13 @@ fn describe(d: &Device<Context>) -> Option<LocalDevice> {
         })
         .unwrap_or_default();
     // Strings need an open handle; devices owned by the OS may refuse.
-    let (manufacturer, product) = match d.open() {
-        Ok(h) => (h.read_manufacturer_string_ascii(&desc).ok(), h.read_product_string_ascii(&desc).ok()),
-        Err(_) => (None, None),
+    let (manufacturer, product, serial) = match d.open() {
+        Ok(h) => (
+            h.read_manufacturer_string_ascii(&desc).ok(),
+            h.read_product_string_ascii(&desc).ok(),
+            h.read_serial_number_string_ascii(&desc).ok(),
+        ),
+        Err(_) => (None, None, None),
     };
     Some(LocalDevice {
         info: DeviceInfo {
@@ -122,6 +126,7 @@ fn describe(d: &Device<Context>) -> Option<LocalDevice> {
         },
         product,
         manufacturer,
+        serial,
         driver: None,
     })
 }

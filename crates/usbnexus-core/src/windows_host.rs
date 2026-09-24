@@ -613,6 +613,7 @@ fn local_device(dev: &PnpDevice) -> Result<Option<LocalDevice>> {
     Ok(Some(LocalDevice {
         manufacturer: string_descriptor(&hub, dev.port, d[14]),
         product: string_descriptor(&hub, dev.port, d[15]).or_else(|| Some(dev.description.clone())),
+        serial: string_descriptor(&hub, dev.port, d[16]),
         driver: Some(dev.service.clone()),
         info,
     }))

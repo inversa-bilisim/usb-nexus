@@ -4,32 +4,47 @@
 //! The USB Nexus service: one long-running process that shares local devices,
 //! keeps remote devices attached, and answers the local API.
 //!
-//! Its settings (shared devices, attachments) are saved in `config.json` in
-//! the state directory and restored on start-up, so shares and attachments
-//! survive reboots.
+//! Its settings (shared devices, access policy, attachments) are saved in
+//! `config.json` in the state directory and restored on start-up, so shares
+//! and attachments survive reboots. Configurations of older versions, which
+//! refer to devices by bus id, are migrated as the devices are seen.
+//!
+//! Shared devices are looked up every few seconds, so a device that is
+//! unplugged stays shared and is offered again when it comes back.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tracing::{debug, warn};
 
+use crate::access::{DeviceAccess, Policy};
 use crate::api::{
     ApiError, AttachState, AttachmentView, DiscoveredView, LocalDeviceView, PairingView, PeersView, RemoteDeviceView,
-    Request, Response, StatusView, WebStatusView,
+    Request, Response, StatusView, UsageView, WebStatusView,
 };
-use crate::backend::{DeviceHost, ImportBackend, SharedExport};
+use crate::backend::{DeviceHost, ImportBackend, SharedDevice, SharedExport};
 use crate::client::{self, AttachEvent, ClientConfig, Target};
+use crate::device_id::DeviceId;
 use crate::discovery;
 use crate::identity::Identity;
-use crate::server::{Server, ServerConfig, ServerEvent};
+use crate::server::{DeviceUse, Server, ServerConfig, ServerEvent};
 use crate::trust::TrustStore;
+use crate::usage::{UsageEntry, UsageKind, UsageLog, DEFAULT_RETENTION_DAYS};
 use crate::web::{self, WebServer, WebSettings};
+
+/// How often connected devices are looked up.
+const POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// How often old usage log entries are dropped.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
+/// Repeated refusals of the same device to the same computer are recorded
+/// at most this often.
+const DENIED_LOG_INTERVAL: Duration = Duration::from_secs(3600);
 
 pub struct DaemonOptions {
     pub state_dir: PathBuf,
@@ -42,27 +57,56 @@ pub struct DaemonOptions {
     pub events: Option<Arc<dyn Fn(ServerEvent) + Send + Sync>>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+fn default_retention() -> u32 {
+    DEFAULT_RETENTION_DAYS
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Config {
+    /// Shared devices (older versions saved bus ids).
     #[serde(default)]
-    shared: Vec<String>,
+    shared: Vec<SharedDevice>,
+    /// Server-wide access policy; `None` until chosen (then: open).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy: Option<Policy>,
     #[serde(default)]
     attachments: Vec<SavedAttachment>,
     #[serde(default)]
     web: WebSettings,
+    #[serde(default = "default_retention")]
+    usage_retention_days: u32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            shared: vec![],
+            policy: None,
+            attachments: vec![],
+            web: WebSettings::default(),
+            usage_retention_days: DEFAULT_RETENTION_DAYS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SavedAttachment {
     server: String,
-    busid: String,
+    /// Device identity on the server (older versions saved a bus id).
+    #[serde(alias = "busid")]
+    device: String,
+    /// Device name as listed by the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
+/// (server fingerprint, device identity)
 type Key = (String, String);
 
 struct Slot {
     state: Arc<Mutex<AttachState>>,
-    ids: Arc<Mutex<Option<(u16, u16)>>>,
+    /// Vendor id, product id and bus id when last attached.
+    seen: Arc<Mutex<Option<(u16, u16, String)>>>,
     task: JoinHandle<()>,
 }
 
@@ -78,6 +122,8 @@ struct Inner {
     clients: TrustStore,
     import: Arc<dyn ImportBackend>,
     attachments: Mutex<HashMap<Key, Slot>>,
+    usage: Arc<UsageLog>,
+    poller: Mutex<Option<JoinHandle<()>>>,
     _mdns: Option<discovery::Advertiser>,
     state_dir: PathBuf,
     /// Running web interface, or why it could not start.
@@ -100,6 +146,42 @@ fn err(e: anyhow::Error) -> Response {
     Response::Error { error: ApiError::from_anyhow(&e) }
 }
 
+/// Usage log entry for a server event.
+fn usage_entry(ev: &ServerEvent) -> UsageEntry {
+    let with_use = |kind, u: &DeviceUse| UsageEntry {
+        computer: Some(u.client.clone()),
+        fingerprint: Some(u.fingerprint.clone()),
+        address: Some(u.addr.ip().to_string()),
+        device: Some(u.device.clone()),
+        device_name: u.device_name.clone(),
+        ..UsageEntry::now(kind)
+    };
+    match ev {
+        ServerEvent::Paired { name, fingerprint, addr } => UsageEntry {
+            computer: Some(name.clone()),
+            fingerprint: Some(fingerprint.clone()),
+            address: Some(addr.ip().to_string()),
+            ..UsageEntry::now(UsageKind::Paired)
+        },
+        ServerEvent::PairingFailed { addr, name, fingerprint } => UsageEntry {
+            computer: Some(name.clone()),
+            fingerprint: Some(fingerprint.clone()),
+            address: Some(addr.ip().to_string()),
+            ..UsageEntry::now(UsageKind::PairingFailed)
+        },
+        ServerEvent::Exported(u) => with_use(UsageKind::Attached, u),
+        ServerEvent::Released { usage, duration } => {
+            UsageEntry { duration_secs: Some(duration.as_secs()), ..with_use(UsageKind::Detached, usage) }
+        }
+        ServerEvent::Denied(u) => with_use(UsageKind::Denied, u),
+    }
+}
+
+/// Whether a saved attachment key refers to a device listed by a server.
+fn refers_to(saved: &str, id: &str, busid: Option<&str>) -> bool {
+    saved == id || (DeviceId::parse(saved).is_legacy() && Some(saved) == busid)
+}
+
 impl Daemon {
     /// Loads state, starts the server and restores saved attachments.
     pub async fn start(opts: DaemonOptions) -> Result<Daemon> {
@@ -112,8 +194,32 @@ impl Daemon {
             Ok(data) => serde_json::from_slice(&data).with_context(|| format!("parsing {}", config_path.display()))?,
             Err(_) => Config::default(),
         };
+        let usage = Arc::new(UsageLog::open(&opts.state_dir.join("usage.log"), config.usage_retention_days));
 
-        let export = Arc::new(SharedExport::new(opts.host.clone(), config.shared.clone()));
+        let export =
+            Arc::new(SharedExport::new(opts.host.clone(), config.shared.clone(), config.policy.unwrap_or_default()));
+        let events = {
+            let (log, forward) = (usage.clone(), opts.events.clone());
+            // A client waiting for permission asks again and again; its
+            // refusals are recorded once per DENIED_LOG_INTERVAL.
+            let denied: Mutex<HashMap<(String, String), Instant>> = Mutex::default();
+            Arc::new(move |ev: ServerEvent| {
+                let record = match &ev {
+                    ServerEvent::Denied(u) => {
+                        let mut denied = denied.lock().unwrap();
+                        denied.retain(|_, t| t.elapsed() < DENIED_LOG_INTERVAL);
+                        denied.insert((u.fingerprint.clone(), u.device.clone()), Instant::now()).is_none()
+                    }
+                    _ => true,
+                };
+                if record {
+                    log.record(usage_entry(&ev));
+                }
+                if let Some(f) = &forward {
+                    f(ev);
+                }
+            })
+        };
         let server = Server::with_events(
             ServerConfig {
                 name: opts.name.clone(),
@@ -121,7 +227,7 @@ impl Daemon {
                 trust: clients.clone(),
                 backend: export.clone(),
             },
-            opts.events.clone().unwrap_or_else(|| Arc::new(|_| {})),
+            events,
         )?;
         let listener =
             TcpListener::bind(&opts.listen).await.with_context(|| format!("listening on {}", opts.listen))?;
@@ -157,13 +263,17 @@ impl Daemon {
                 clients,
                 import: opts.import,
                 attachments: Mutex::new(HashMap::new()),
+                usage,
+                poller: Mutex::new(None),
                 _mdns: mdns,
                 state_dir: opts.state_dir.clone(),
                 web: tokio::sync::Mutex::new(Ok(None)),
             }),
         };
+        daemon.poll_devices();
+        *daemon.inner.poller.lock().unwrap() = Some(daemon.spawn_poller());
         for a in saved {
-            daemon.spawn_attachment(&a.server, &a.busid);
+            daemon.spawn_attachment(&a.server, &a.device);
         }
         daemon.restart_web().await;
         Ok(daemon)
@@ -178,10 +288,14 @@ impl Daemon {
         if let Ok(mut web) = self.inner.web.try_lock() {
             *web = Ok(None);
         }
+        if let Some(p) = self.inner.poller.lock().unwrap().take() {
+            p.abort();
+        }
         for (_, slot) in self.inner.attachments.lock().unwrap().drain() {
             slot.task.abort();
         }
-        for busid in self.inner.export.shared() {
+        let Ok((_, resolved)) = self.inner.export.snapshot() else { return };
+        for busid in resolved.into_iter().filter_map(|r| r.device).map(|d| d.info.busid) {
             if let Err(e) = self.inner.export.host().release(&busid) {
                 warn!(busid, "could not release device: {e:#}");
             }
@@ -189,7 +303,10 @@ impl Daemon {
     }
 
     fn save(&self) -> Result<()> {
-        let data = serde_json::to_vec_pretty(&*self.inner.config.lock().unwrap())?;
+        // The lock is held until the file is replaced, so saves from the
+        // device poller and API requests do not interleave.
+        let config = self.inner.config.lock().unwrap();
+        let data = serde_json::to_vec_pretty(&*config)?;
         let tmp = self.inner.config_path.with_extension("tmp");
         // Holds the web password hash: owner-only.
         crate::identity::write_private(&tmp, &data)?;
@@ -197,56 +314,175 @@ impl Daemon {
         Ok(())
     }
 
-    fn spawn_attachment(&self, server: &str, busid: &str) {
-        let key = (server.to_string(), busid.to_string());
+    /// Saves the shared devices after a change and ends sessions the new
+    /// settings no longer allow.
+    fn shares_changed(&self) -> Result<()> {
+        self.inner.config.lock().unwrap().shared = self.inner.export.shared();
+        self.save()?;
+        if let Err(e) = self.inner.server.enforce() {
+            warn!("could not check active sessions: {e:#}");
+        }
+        Ok(())
+    }
+
+    /// Looks at the connected devices: remembers names of shared devices and
+    /// migrates bus ids of older configurations.
+    fn poll_devices(&self) {
+        match self.inner.export.refresh() {
+            Ok(true) => {
+                if let Err(e) = self.shares_changed() {
+                    warn!("could not save the configuration: {e:#}");
+                }
+            }
+            Ok(false) => {}
+            Err(e) => debug!("listing devices failed: {e:#}"),
+        }
+    }
+
+    fn spawn_poller(&self) -> JoinHandle<()> {
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            let mut last_prune = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                let Some(inner) = weak.upgrade() else { return };
+                let daemon = Daemon { inner };
+                // Listing devices may block (e.g. opening hubs on Windows).
+                let d = daemon.clone();
+                let _ = tokio::task::spawn_blocking(move || d.poll_devices()).await;
+                if last_prune.elapsed() >= PRUNE_INTERVAL {
+                    last_prune = tokio::time::Instant::now();
+                    let usage = daemon.inner.usage.clone();
+                    let _ = tokio::task::spawn_blocking(move || usage.prune()).await;
+                }
+            }
+        })
+    }
+
+    fn spawn_attachment(&self, server: &str, device: &str) {
+        let key = (server.to_string(), device.to_string());
         let mut map = self.inner.attachments.lock().unwrap();
         if map.get(&key).is_some_and(|s| !s.task.is_finished()) {
             return;
         }
         let state = Arc::new(Mutex::new(AttachState::Connecting));
-        let ids = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(None));
         let (cfg, import) = (self.inner.client.clone(), self.inner.import.clone());
-        let (st, id2) = (state.clone(), ids.clone());
-        let (fp, bus) = key.clone();
+        let (st, seen2) = (state.clone(), seen.clone());
+        let weak = Arc::downgrade(&self.inner);
+        let (fp, dev) = key.clone();
         let task = tokio::spawn(async move {
-            let target = Target::Peer { fingerprint: fp };
+            let target = Target::Peer { fingerprint: fp.clone() };
+            // The key changes when an attachment saved by bus id learns the
+            // device identity.
+            let current = Mutex::new(dev.clone());
             let events = |ev: AttachEvent| {
                 let next = match ev {
                     AttachEvent::Connecting { .. } => AttachState::Connecting,
-                    AttachEvent::Attached { port, device } => {
-                        *id2.lock().unwrap() = Some((device.id_vendor, device.id_product));
+                    AttachEvent::Attached { port, device, id } => {
+                        *seen2.lock().unwrap() = Some((device.id_vendor, device.id_product, device.busid.clone()));
+                        let mut cur = current.lock().unwrap();
+                        if *cur != id {
+                            if let Some(inner) = weak.upgrade() {
+                                Daemon { inner }.rekey(&fp, &cur, &id);
+                            }
+                            cur.clone_from(&id);
+                        }
                         AttachState::Attached { port }
                     }
                     AttachEvent::Retrying { delay } => {
-                        let error = match &*st.lock().unwrap() {
-                            AttachState::Retrying { error, .. } => error.clone(),
-                            _ => ApiError::new("connection_lost", ""),
-                        };
-                        AttachState::Retrying { seconds: delay.as_secs_f64().ceil() as u64, error }
+                        let seconds = delay.as_secs_f64().ceil() as u64;
+                        match &*st.lock().unwrap() {
+                            AttachState::Waiting { error, .. } => {
+                                AttachState::Waiting { seconds, error: error.clone() }
+                            }
+                            AttachState::Retrying { error, .. } => {
+                                AttachState::Retrying { seconds, error: error.clone() }
+                            }
+                            _ => AttachState::Retrying { seconds, error: ApiError::new("connection_lost", "") },
+                        }
                     }
-                    AttachEvent::Disconnected { error } => AttachState::Retrying { seconds: 0, error },
+                    AttachEvent::Disconnected { error } => match error.code.as_str() {
+                        "no_such_device" | "access_denied" => AttachState::Waiting { seconds: 0, error },
+                        _ => AttachState::Retrying { seconds: 0, error },
+                    },
                     AttachEvent::Detached => AttachState::Stopped,
                 };
                 *st.lock().unwrap() = next;
             };
-            let result = client::attach_forever(&cfg, &target, &bus, import, events).await;
+            let result = client::attach_forever(&cfg, &target, &dev, import, events).await;
             *st.lock().unwrap() = match result {
                 Ok(()) => AttachState::Stopped,
                 Err(e) => AttachState::Failed { error: ApiError::from_anyhow(&e) },
             };
         });
-        map.insert(key, Slot { state, ids, task });
+        map.insert(key, Slot { state, seen, task });
     }
 
-    fn remove_attachment(&self, server: &str, busid: &str) -> Result<()> {
-        if let Some(slot) = self.inner.attachments.lock().unwrap().remove(&(server.to_string(), busid.to_string())) {
-            // Dropping the relay closes the socket; the OS detaches the device.
-            slot.task.abort();
+    /// Renames an attachment saved by bus id once the device identity is known.
+    fn rekey(&self, server: &str, old: &str, new: &str) {
+        {
+            let mut map = self.inner.attachments.lock().unwrap();
+            let new_key = (server.to_string(), new.to_string());
+            if map.contains_key(&new_key) {
+                return;
+            }
+            if let Some(slot) = map.remove(&(server.to_string(), old.to_string())) {
+                map.insert(new_key, slot);
+            }
         }
-        self.inner.config.lock().unwrap().attachments.retain(|a| !(a.server == server && a.busid == busid));
+        {
+            let mut cfg = self.inner.config.lock().unwrap();
+            for a in cfg.attachments.iter_mut().filter(|a| a.server == server && a.device == old) {
+                a.device = new.to_string();
+            }
+        }
+        if let Err(e) = self.save() {
+            warn!("could not save the configuration: {e:#}");
+        }
+    }
+
+    fn remove_attachment(&self, server: &str, device: &str) -> Result<()> {
+        let busid = DeviceId::parse(device).busid().map(str::to_string);
+        let matches = |s: &str, d: &str| s == server && refers_to(d, device, busid.as_deref());
+        self.inner.attachments.lock().unwrap().retain(|(s, d), slot| {
+            let remove = matches(s, d);
+            if remove {
+                // Dropping the relay closes the socket; the OS detaches the device.
+                slot.task.abort();
+            }
+            !remove
+        });
+        self.inner.config.lock().unwrap().attachments.retain(|a| !matches(&a.server, &a.device));
         self.save()
     }
 
+    /// Saves the names of attached devices listed by `server`, so they can
+    /// be shown while the server is unreachable.
+    fn remember_names(&self, server: &str, devices: &[RemoteDeviceView]) {
+        let mut changed = false;
+        {
+            let mut cfg = self.inner.config.lock().unwrap();
+            for a in cfg.attachments.iter_mut().filter(|a| a.server == server) {
+                let Some(d) = devices.iter().find(|d| refers_to(&a.device, &d.id, d.busid.as_deref())) else {
+                    continue;
+                };
+                let name =
+                    [d.manufacturer.clone(), d.product.clone()].into_iter().flatten().reduce(|a, b| a + " " + &b);
+                if name.is_some() && a.name != name {
+                    a.name = name;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            if let Err(e) = self.save() {
+                warn!("could not save the configuration: {e:#}");
+            }
+        }
+    }
+
+    /// Devices of `server` attached (or being attached) here.
     fn attached_here(&self, server: &str) -> Vec<String> {
         self.inner
             .attachments
@@ -254,7 +490,7 @@ impl Daemon {
             .unwrap()
             .iter()
             .filter(|((s, _), slot)| s == server && !matches!(*slot.state.lock().unwrap(), AttachState::Stopped))
-            .map(|((_, b), _)| b.clone())
+            .map(|((_, d), _)| d.clone())
             .collect()
     }
 
@@ -300,6 +536,64 @@ impl Daemon {
         }
     }
 
+    /// Devices of this computer: every connected device, then shared
+    /// devices that are not plugged in.
+    fn local_devices(&self) -> Result<Vec<LocalDeviceView>> {
+        let inner = &self.inner;
+        let (connected, resolved) = inner.export.snapshot()?;
+        let in_use = inner.server.in_use();
+        let policy = inner.export.policy();
+        let shared_view = |id: &DeviceId, access: Option<&DeviceAccess>| {
+            (
+                access.cloned(),
+                access.is_some_and(|a| a.is_open(policy)),
+                in_use.get(&id.to_string()).map(|u| u.0.clone()),
+            )
+        };
+        let mut out = vec![];
+        for d in &connected {
+            let entry = resolved.iter().find(|r| r.device.as_ref() == Some(d)).map(|r| &r.shared);
+            let id = entry.map(|e| e.id.clone()).unwrap_or_else(|| DeviceId::of(d));
+            let (access, open_to_all, used_by) = shared_view(&id, entry.map(|e| &e.access));
+            out.push(LocalDeviceView {
+                id: id.to_string(),
+                busid: Some(d.info.busid.clone()),
+                vendor_id: d.info.id_vendor,
+                product_id: d.info.id_product,
+                product: d.product.clone(),
+                manufacturer: d.manufacturer.clone(),
+                speed: d.info.speed.label().to_string(),
+                present: true,
+                by_port: id.by_port(),
+                shared: entry.is_some(),
+                access,
+                open_to_all,
+                used_by,
+            });
+        }
+        for r in resolved.iter().filter(|r| r.device.is_none()) {
+            let s = &r.shared;
+            let (vendor_id, product_id) = s.id.ids().unwrap_or_default();
+            let (access, open_to_all, used_by) = shared_view(&s.id, Some(&s.access));
+            out.push(LocalDeviceView {
+                id: s.id.to_string(),
+                busid: None,
+                vendor_id,
+                product_id,
+                product: s.product.clone(),
+                manufacturer: s.manufacturer.clone(),
+                speed: String::new(),
+                present: false,
+                by_port: s.id.by_port(),
+                shared: true,
+                access,
+                open_to_all,
+                used_by,
+            });
+        }
+        Ok(out)
+    }
+
     pub async fn handle(&self, req: Request) -> Response {
         match self.dispatch(req).await {
             Ok(r) => r,
@@ -316,30 +610,53 @@ impl Daemon {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 listen: inner.listen.clone(),
                 pairing: inner.server.pairing().map(|(pin, left)| PairingView { pin, remaining_secs: left.as_secs() }),
+                policy: inner.export.policy(),
+                policy_chosen: inner.config.lock().unwrap().policy.is_some(),
             }),
-            Request::LocalDevices => {
-                let in_use = inner.server.in_use();
-                let devices: Vec<LocalDeviceView> = inner
-                    .export
-                    .host()
-                    .list_all()?
-                    .into_iter()
-                    .map(|d| LocalDeviceView {
-                        shared: inner.export.is_shared(&d.info.busid),
-                        used_by: in_use.get(&d.info.busid).cloned(),
-                        busid: d.info.busid,
-                        vendor_id: d.info.id_vendor,
-                        product_id: d.info.id_product,
-                        product: d.product,
-                        manufacturer: d.manufacturer,
-                        speed: d.info.speed.label().to_string(),
-                    })
-                    .collect();
-                ok(devices)
+            Request::LocalDevices => ok(self.local_devices()?),
+            Request::SetShared { device, shared } => {
+                if inner.export.set_shared(&device, shared)? {
+                    self.shares_changed()?;
+                }
+                ok(())
             }
-            Request::SetShared { busid, shared } => {
-                inner.export.set_shared(&busid, shared)?;
-                inner.config.lock().unwrap().shared = inner.export.shared().into_iter().collect();
+            Request::SetPolicy { policy } => {
+                inner.export.set_policy(policy);
+                inner.config.lock().unwrap().policy = Some(policy);
+                self.shares_changed()?;
+                ok(())
+            }
+            Request::SetDeviceAccess { device, mode, allowed } => {
+                let current = inner.export.shared().into_iter().find(|s| s.id.to_string() == device);
+                let mut access = current.map(|s| s.access).unwrap_or_default();
+                access.mode = mode;
+                if let Some(list) = allowed {
+                    access.allowed = list.into_iter().collect();
+                }
+                inner.export.set_access(&device, access)?;
+                self.shares_changed()?;
+                ok(())
+            }
+            Request::SetClientAccess { fingerprint, devices } => {
+                if !inner.clients.is_trusted(&fingerprint) {
+                    return Err(ApiError::new("not_found", "no such paired computer").into());
+                }
+                inner.export.set_client_devices(&fingerprint, &devices)?;
+                self.shares_changed()?;
+                ok(())
+            }
+            Request::Usage { limit } => {
+                let usage = inner.usage.clone();
+                let mut entries = tokio::task::spawn_blocking(move || usage.entries()).await?;
+                entries.reverse();
+                entries.truncate(limit.unwrap_or(usize::MAX));
+                ok(UsageView { entries, retention_days: inner.usage.retention_days() })
+            }
+            Request::SetUsageRetention { days } => {
+                let days = days.clamp(1, 3650);
+                let usage = inner.usage.clone();
+                tokio::task::spawn_blocking(move || usage.set_retention_days(days)).await?;
+                inner.config.lock().unwrap().usage_retention_days = days;
                 self.save()?;
                 ok(())
             }
@@ -379,72 +696,100 @@ impl Daemon {
                     .await?
                     .into_iter()
                     .map(|d| RemoteDeviceView {
-                        attached_here: here.contains(&d.info.busid),
+                        attached_here: here
+                            .iter()
+                            .any(|h| refers_to(h, &d.id, d.present.then_some(d.info.busid.as_str()))),
+                        by_port: DeviceId::parse(&d.id).by_port(),
                         in_use: d.in_use,
-                        busid: d.info.busid,
+                        present: d.present,
+                        allowed: d.allowed,
+                        // Older servers do not report identities.
+                        id: if d.id.is_empty() { d.info.busid.clone() } else { d.id },
+                        busid: d.present.then_some(d.info.busid),
                         vendor_id: d.info.id_vendor,
                         product_id: d.info.id_product,
                         product: d.product,
                         manufacturer: d.manufacturer,
-                        speed: d.info.speed.label().to_string(),
+                        speed: if d.present { d.info.speed.label().to_string() } else { String::new() },
                     })
                     .collect();
+                self.remember_names(&server, &devices);
                 ok(devices)
             }
-            Request::Attach { server, busid } => {
+            Request::Attach { server, device } => {
                 if !inner.client.trust.is_trusted(&server) {
                     return Err(ApiError::new("not_trusted", "server is not paired").into());
                 }
                 {
                     let mut cfg = inner.config.lock().unwrap();
-                    let entry = SavedAttachment { server: server.clone(), busid: busid.clone() };
-                    if !cfg.attachments.contains(&entry) {
-                        cfg.attachments.push(entry);
+                    if !cfg.attachments.iter().any(|a| a.server == server && a.device == device) {
+                        cfg.attachments.push(SavedAttachment {
+                            server: server.clone(),
+                            device: device.clone(),
+                            name: None,
+                        });
                     }
                 }
                 self.save()?;
-                self.spawn_attachment(&server, &busid);
+                self.spawn_attachment(&server, &device);
                 ok(())
             }
-            Request::Detach { server, busid } => {
-                self.remove_attachment(&server, &busid)?;
+            Request::Detach { server, device } => {
+                self.remove_attachment(&server, &device)?;
                 ok(())
             }
             Request::Attachments => {
                 let map = inner.attachments.lock().unwrap();
                 let mut views: Vec<AttachmentView> = map
                     .iter()
-                    .map(|((server, busid), slot)| {
-                        let ids = *slot.ids.lock().unwrap();
+                    .map(|((server, device), slot)| {
+                        let seen = slot.seen.lock().unwrap().clone();
+                        let ids = seen.as_ref().map(|s| (s.0, s.1)).or_else(|| DeviceId::parse(device).ids());
                         AttachmentView {
                             server_name: inner.client.trust.get(server).map(|p| p.name).unwrap_or_default(),
                             server: server.clone(),
-                            busid: busid.clone(),
+                            device: device.clone(),
+                            busid: seen.map(|s| s.2),
+                            name: None,
                             vendor_id: ids.map(|i| i.0),
                             product_id: ids.map(|i| i.1),
                             state: slot.state.lock().unwrap().clone(),
                         }
                     })
                     .collect();
-                views.sort_by(|a, b| (&a.server_name, &a.busid).cmp(&(&b.server_name, &b.busid)));
+                let names: HashMap<(String, String), String> = inner
+                    .config
+                    .lock()
+                    .unwrap()
+                    .attachments
+                    .iter()
+                    .filter_map(|a| Some(((a.server.clone(), a.device.clone()), a.name.clone()?)))
+                    .collect();
+                for v in &mut views {
+                    v.name = names.get(&(v.server.clone(), v.device.clone())).cloned();
+                }
+                views.sort_by(|a, b| (&a.server_name, &a.device).cmp(&(&b.server_name, &b.device)));
                 ok(views)
             }
             Request::Peers => ok(PeersView { servers: inner.client.trust.peers(), clients: inner.clients.peers() }),
             Request::Forget { fingerprint } => {
-                let busids: Vec<String> = inner
+                let devices: Vec<String> = inner
                     .config
                     .lock()
                     .unwrap()
                     .attachments
                     .iter()
                     .filter(|a| a.server == fingerprint)
-                    .map(|a| a.busid.clone())
+                    .map(|a| a.device.clone())
                     .collect();
-                for b in busids {
-                    self.remove_attachment(&fingerprint, &b)?;
+                for d in devices {
+                    self.remove_attachment(&fingerprint, &d)?;
                 }
                 inner.client.trust.remove(&fingerprint)?;
                 inner.clients.remove(&fingerprint)?;
+                inner.export.forget_client(&fingerprint);
+                // Also ends the sessions of the forgotten computer.
+                self.shares_changed()?;
                 ok(())
             }
             Request::WebStatus => ok(self.web_status().await),

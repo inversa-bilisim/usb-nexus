@@ -4,6 +4,7 @@
 //! End-to-end tests of server and client over real TCP + TLS, with mock
 //! backends standing in for the kernel USB/IP drivers.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,9 +12,12 @@ use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use usbnexus_core::backend::{into_tokio, loopback_pair, BoxFuture, ExportBackend, ImportBackend, LocalDevice};
+use usbnexus_core::backend::{
+    into_tokio, loopback_pair, Allowed, BoxFuture, ExportBackend, ImportBackend, LocalDevice, Offered,
+};
 use usbnexus_core::client::{self, AttachEvent, ClientConfig, ClientError, Target};
 use usbnexus_core::control::{ErrorCode, RemoteError};
+use usbnexus_core::device_id::DeviceId;
 use usbnexus_core::identity::Identity;
 use usbnexus_core::server::{Server, ServerConfig};
 use usbnexus_core::trust::TrustStore;
@@ -38,12 +42,37 @@ fn device() -> DeviceInfo {
     }
 }
 
+const DEVICE_ID: &str = "1234:5678:SER1";
+
 /// Export side "kernel": echoes URB bytes; closes the socket on "bye".
-struct MockExport;
+/// Offers one device, which can be unplugged and restricted.
+struct MockExport {
+    plugged: AtomicBool,
+    allowed: Mutex<Allowed>,
+}
+
+impl Default for MockExport {
+    fn default() -> Self {
+        MockExport { plugged: AtomicBool::new(true), allowed: Mutex::new(Allowed::Everyone) }
+    }
+}
 
 impl ExportBackend for MockExport {
-    fn list(&self) -> Result<Vec<LocalDevice>> {
-        Ok(vec![LocalDevice { info: device(), product: Some("Mock".into()), manufacturer: None, driver: None }])
+    fn list(&self) -> Result<Vec<Offered>> {
+        let local = LocalDevice {
+            info: device(),
+            product: Some("Mock".into()),
+            manufacturer: None,
+            serial: Some("SER1".into()),
+            driver: None,
+        };
+        Ok(vec![Offered {
+            id: DeviceId::of(&local),
+            device: self.plugged.load(Ordering::SeqCst).then_some(local),
+            product: Some("Mock".into()),
+            manufacturer: None,
+            allowed: self.allowed.lock().unwrap().clone(),
+        }])
     }
 
     fn export<'a>(&'a self, _busid: &'a str) -> BoxFuture<'a, Result<TcpStream>> {
@@ -91,6 +120,7 @@ impl ImportBackend for MockImport {
 
 struct Fixture {
     server: Server,
+    export: Arc<MockExport>,
     server_trust: TrustStore,
     addr: String,
     client: ClientConfig,
@@ -98,11 +128,12 @@ struct Fixture {
 
 async fn start() -> Fixture {
     let server_trust = TrustStore::in_memory();
+    let export = Arc::new(MockExport::default());
     let server = Server::new(ServerConfig {
         name: "test-server".into(),
         identity: Identity::generate("test-server").unwrap(),
         trust: server_trust.clone(),
-        backend: Arc::new(MockExport),
+        backend: export.clone(),
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -114,7 +145,7 @@ async fn start() -> Fixture {
         identity: Identity::generate("test-client").unwrap(),
         trust: TrustStore::in_memory(),
     };
-    Fixture { server, server_trust, addr, client }
+    Fixture { server, export, server_trust, addr, client }
 }
 
 fn remote_code(e: &anyhow::Error) -> Option<ErrorCode> {
@@ -149,6 +180,8 @@ async fn pairing_flow() {
     let devices = s.list().await.unwrap();
     assert_eq!(devices.len(), 1);
     assert_eq!(devices[0].product.as_deref(), Some("Mock"));
+    assert_eq!(devices[0].id, DEVICE_ID);
+    assert!(devices[0].present && devices[0].allowed);
 
     // Later connections need no PIN.
     let mut s = client::connect(&f.client, &f.addr, None).await.unwrap();
@@ -183,10 +216,12 @@ async fn busy_and_unknown_devices() {
     let e = s.import("9-9").await.err().unwrap();
     assert_eq!(remote_code(&e), Some(ErrorCode::NoSuchDevice));
 
+    // Asking by bus id (older clients) reports the identity to use instead.
     let s = client::connect(&f.client, &f.addr, None).await.unwrap();
-    let (_dev, _held) = s.import("1-1").await.unwrap();
+    let (_dev, id, _held) = s.import("1-1").await.unwrap();
+    assert_eq!(id, DEVICE_ID);
     let s = client::connect(&f.client, &f.addr, None).await.unwrap();
-    let e = s.import("1-1").await.err().unwrap();
+    let e = s.import(DEVICE_ID).await.err().unwrap();
     assert_eq!(remote_code(&e), Some(ErrorCode::DeviceBusy));
 }
 
@@ -242,13 +277,102 @@ async fn attach_relays_and_reconnects() {
     assert!(res.is_ok(), "{res:?}");
 }
 
+/// Starts `attach_forever` for `device` and forwards its events.
+fn spawn_attach(
+    f: &Fixture,
+    device: &str,
+) -> (Arc<MockImport>, mpsc::UnboundedReceiver<AttachEvent>, tokio::task::JoinHandle<Result<()>>) {
+    let import = Arc::new(MockImport::default());
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (cfg, target, backend) = (f.client.clone(), Target::Addr(f.addr.clone()), import.clone());
+    let device = device.to_string();
+    let task = tokio::spawn(async move {
+        client::attach_forever(&cfg, &target, &device, backend, move |e| {
+            let _ = tx.send(e);
+        })
+        .await
+    });
+    (import, rx, task)
+}
+
+/// Waits for a failed attempt with the given API error code.
+async fn expect_error(rx: &mut mpsc::UnboundedReceiver<AttachEvent>, code: &str) {
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv()).await.expect("no error reported").unwrap();
+        if let AttachEvent::Disconnected { error } = ev {
+            if error.code == code {
+                return;
+            }
+        }
+    }
+}
+
 #[tokio::test]
-async fn attach_gives_up_on_permanent_errors() {
+async fn attach_waits_for_unplugged_device() {
     let f = start().await;
     f.server.open_pairing_with_pin("444444", Duration::from_secs(60));
     client::connect(&f.client, &f.addr, Some("444444")).await.unwrap();
 
+    // Unplugged devices stay listed; attaching waits for them.
+    f.export.plugged.store(false, Ordering::SeqCst);
+    let mut s = client::connect(&f.client, &f.addr, None).await.unwrap();
+    let listed = s.list().await.unwrap();
+    assert!(!listed[0].present);
+    assert_eq!(listed[0].info.id_vendor, 0x1234);
+
+    let (_import, mut rx, task) = spawn_attach(&f, DEVICE_ID);
+    expect_error(&mut rx, "no_such_device").await;
+    expect_error(&mut rx, "no_such_device").await;
+    assert!(!task.is_finished(), "a missing device is not a permanent error");
+
+    // Plugged in again: attached without doing anything.
+    f.export.plugged.store(true, Ordering::SeqCst);
+    let id = loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv()).await.unwrap().unwrap();
+        if let AttachEvent::Attached { id, .. } = ev {
+            break id;
+        }
+    };
+    assert_eq!(id, DEVICE_ID);
+    task.abort();
+}
+
+#[tokio::test]
+async fn access_is_checked_and_revoking_disconnects() {
+    let f = start().await;
+    f.server.open_pairing_with_pin("555555", Duration::from_secs(60));
+    client::connect(&f.client, &f.addr, Some("555555")).await.unwrap();
+    let me = f.client.identity.fingerprint();
+
+    // Restricted: the device is visible but marked, and importing is refused.
+    *f.export.allowed.lock().unwrap() = Allowed::Only(Default::default());
+    let mut s = client::connect(&f.client, &f.addr, None).await.unwrap();
+    assert!(!s.list().await.unwrap()[0].allowed);
+    let e = s.import(DEVICE_ID).await.err().unwrap();
+    assert_eq!(remote_code(&e), Some(ErrorCode::AccessDenied));
+
+    // Allowed: attaches.
+    *f.export.allowed.lock().unwrap() = Allowed::Only([me.clone()].into());
+    let (_import, mut rx, task) = spawn_attach(&f, DEVICE_ID);
+    expect_attached(&mut rx).await;
+    assert_eq!(f.server.in_use().get(DEVICE_ID).map(|u| u.1.clone()), Some(me));
+
+    // Revoked: the session ends at once and the client waits for permission.
+    *f.export.allowed.lock().unwrap() = Allowed::Only(Default::default());
+    assert_eq!(f.server.enforce().unwrap(), 1);
+    expect_error(&mut rx, "access_denied").await;
+    assert!(!task.is_finished());
+    task.abort();
+}
+
+#[tokio::test]
+async fn attach_gives_up_on_permanent_errors() {
+    let f = start().await;
+    f.server.open_pairing_with_pin("666666", Duration::from_secs(60));
+    client::connect(&f.client, &f.addr, Some("666666")).await.unwrap();
+    // The server forgot this computer: pairing again is needed.
+    f.server_trust.remove(&f.client.identity.fingerprint()).unwrap();
     let import: Arc<dyn ImportBackend> = Arc::new(MockImport::default());
-    let res = client::attach_forever(&f.client, &Target::Addr(f.addr.clone()), "7-7", import, |_| {}).await;
-    assert_eq!(remote_code(&res.unwrap_err()), Some(ErrorCode::NoSuchDevice));
+    let res = client::attach_forever(&f.client, &Target::Addr(f.addr.clone()), DEVICE_ID, import, |_| {}).await;
+    assert!(matches!(res.unwrap_err().downcast_ref::<ClientError>(), Some(ClientError::PairingRequired { .. })));
 }

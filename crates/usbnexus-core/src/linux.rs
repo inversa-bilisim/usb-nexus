@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use usbnexus_proto::{DeviceInfo, InterfaceInfo, Speed};
 
-use crate::backend::{into_tokio, loopback_pair, DeviceHost, ImportBackend, LocalDevice};
+use crate::backend::{into_tokio, loopback_pair, BoxFuture, DeviceHost, ImportBackend, LocalDevice};
 
 const STUB_DRIVER: &str = "usbip-host";
 /// `SDEV_ST_AVAILABLE` in the stub driver.
@@ -241,7 +241,18 @@ impl LinuxImport {
 }
 
 impl ImportBackend for LinuxImport {
-    fn attach(&self, device: &DeviceInfo) -> Result<(u32, tokio::net::TcpStream)> {
+    fn attach<'a>(&'a self, device: &'a DeviceInfo) -> BoxFuture<'a, Result<(u32, tokio::net::TcpStream)>> {
+        // sysfs writes are quick; no need to leave the async context.
+        Box::pin(async move { self.attach_now(device) })
+    }
+
+    fn detach(&self, port: u32) -> Result<()> {
+        sysfs_write(&self.vhci_dir().join("detach"), &port.to_string())
+    }
+}
+
+impl LinuxImport {
+    fn attach_now(&self, device: &DeviceInfo) -> Result<(u32, tokio::net::TcpStream)> {
         let ss = device.speed.is_superspeed();
         let mut last_err = None;
         // Another process may grab the same free port; retry on the next one.
@@ -262,10 +273,6 @@ impl ImportBackend for LinuxImport {
             }
         }
         Err(last_err.unwrap_or_else(|| anyhow!("attach failed")))
-    }
-
-    fn detach(&self, port: u32) -> Result<()> {
-        sysfs_write(&self.vhci_dir().join("detach"), &port.to_string())
     }
 }
 
@@ -351,7 +358,7 @@ mod tests {
         fs::write(vhci.join("attach"), "").unwrap();
 
         let dev = read_device_fixture(tmp.path());
-        let (port, _sock) = LinuxImport::new(tmp.path()).attach(&dev).unwrap();
+        let (port, _sock) = LinuxImport::new(tmp.path()).attach(&dev).await.unwrap();
         assert_eq!(port, 1);
         let line = fs::read_to_string(vhci.join("attach")).unwrap();
         let f: Vec<&str> = line.split(' ').collect();

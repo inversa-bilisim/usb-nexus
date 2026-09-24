@@ -103,11 +103,32 @@ impl ExportBackend for SharedExport {
     }
 }
 
+/// Placeholder for platforms where sharing local devices is not available
+/// yet; every call fails with the `unsupported` API error.
+pub struct UnsupportedHost;
+
+impl DeviceHost for UnsupportedHost {
+    fn list_all(&self) -> Result<Vec<LocalDevice>> {
+        Err(crate::api::ApiError::new("unsupported", "sharing devices is not supported on this platform yet").into())
+    }
+
+    fn export(&self, _busid: &str) -> Result<tokio::net::TcpStream> {
+        self.list_all().map(|_| unreachable!())
+    }
+
+    fn release(&self, _busid: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// A boxed, sendable future (object-safe async trait methods).
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 /// Client side: attaches remote devices to a virtual host controller.
 pub trait ImportBackend: Send + Sync + 'static {
     /// Attaches `device`; returns the virtual port and the socket that
     /// carries its URB traffic. Dropping the socket detaches the device.
-    fn attach(&self, device: &DeviceInfo) -> Result<(u32, tokio::net::TcpStream)>;
+    fn attach<'a>(&'a self, device: &'a DeviceInfo) -> BoxFuture<'a, Result<(u32, tokio::net::TcpStream)>>;
 
     /// Explicitly detaches a virtual port.
     fn detach(&self, port: u32) -> Result<()>;
@@ -159,7 +180,7 @@ pub mod demo {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use usbnexus_proto::{DeviceInfo, InterfaceInfo, Speed};
 
-    use super::{into_tokio, loopback_pair, DeviceHost, ImportBackend, LocalDevice};
+    use super::{into_tokio, loopback_pair, BoxFuture, DeviceHost, ImportBackend, LocalDevice};
 
     fn device(busid: &str, devnum: u32, vid: u16, pid: u16, speed: Speed, mfr: &str, product: &str) -> LocalDevice {
         LocalDevice {
@@ -228,19 +249,21 @@ pub mod demo {
     }
 
     impl ImportBackend for DemoImport {
-        fn attach(&self, _device: &DeviceInfo) -> Result<(u32, tokio::net::TcpStream)> {
-            let (ours, kernel) = loopback_pair()?;
-            let mut kernel = into_tokio(kernel)?;
-            // Hold the "kernel" end open, like an attached device would.
-            tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                while let Ok(n) = kernel.read(&mut buf).await {
-                    if n == 0 {
-                        break;
+        fn attach<'a>(&'a self, _device: &'a DeviceInfo) -> BoxFuture<'a, Result<(u32, tokio::net::TcpStream)>> {
+            Box::pin(async move {
+                let (ours, kernel) = loopback_pair()?;
+                let mut kernel = into_tokio(kernel)?;
+                // Hold the "kernel" end open, like an attached device would.
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = kernel.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
                     }
-                }
-            });
-            Ok((self.next.fetch_add(1, Ordering::Relaxed), into_tokio(ours)?))
+                });
+                Ok((self.next.fetch_add(1, Ordering::Relaxed), into_tokio(ours)?))
+            })
         }
 
         fn detach(&self, _port: u32) -> Result<()> {

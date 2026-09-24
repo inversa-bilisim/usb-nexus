@@ -198,12 +198,69 @@ pub struct PeersView {
     pub clients: Vec<Peer>,
 }
 
-/// Socket of the system service: `$USBNEXUS_SOCKET`, or the platform default.
+/// Address of the system service: `$USBNEXUS_SOCKET`, or the platform
+/// default (a Unix socket path, or a named pipe on Windows).
 pub fn default_socket() -> std::path::PathBuf {
     if let Some(p) = std::env::var_os("USBNEXUS_SOCKET") {
         return p.into();
     }
-    std::path::PathBuf::from("/run/usbnexus/daemon.sock")
+    if cfg!(windows) {
+        std::path::PathBuf::from(r"\\.\pipe\usbnexus")
+    } else {
+        std::path::PathBuf::from("/run/usbnexus/daemon.sock")
+    }
+}
+
+/// Largest accepted request line.
+const MAX_LINE: usize = 64 * 1024;
+
+/// Answers requests on one connection until the client disconnects.
+async fn serve_connection<R, W>(r: R, mut w: W, daemon: crate::daemon::Daemon)
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    let mut r = BufReader::new(r);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match (&mut r).take(MAX_LINE as u64).read_line(&mut line).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        let resp = match serde_json::from_str::<Request>(&line) {
+            Ok(req) => daemon.handle(req).await,
+            Err(e) => Response::Error { error: ApiError::new("invalid", e.to_string()) },
+        };
+        let Ok(mut out) = serde_json::to_vec(&resp) else { return };
+        out.push(b'\n');
+        if w.write_all(&out).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Sends one request over a connected stream and decodes the response data.
+async fn exchange<S, T>(stream: S, req: &Request) -> anyhow::Result<T>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    T: serde::de::DeserializeOwned,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (r, mut w) = tokio::io::split(stream);
+    let mut out = serde_json::to_vec(req)?;
+    out.push(b'\n');
+    w.write_all(&out).await?;
+    let mut line = String::new();
+    BufReader::new(r).read_line(&mut line).await?;
+    if line.is_empty() {
+        anyhow::bail!("service closed the connection");
+    }
+    match serde_json::from_str::<Response>(&line)? {
+        Response::Ok { data } => Ok(serde_json::from_value(data)?),
+        Response::Error { error } => Err(error.into()),
+    }
 }
 
 #[cfg(unix)]
@@ -213,61 +270,121 @@ pub use unix::{call, serve};
 mod unix {
     use std::path::Path;
 
-    use anyhow::{bail, Result};
+    use anyhow::Result;
     use serde::de::DeserializeOwned;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
 
-    use super::{ApiError, Request, Response};
+    use super::Request;
     use crate::daemon::Daemon;
-
-    /// Largest accepted request line.
-    const MAX_LINE: usize = 64 * 1024;
 
     /// Serves API requests on `listener` until it fails.
     pub async fn serve(listener: UnixListener, daemon: Daemon) {
         while let Ok((stream, _)) = listener.accept().await {
-            let daemon = daemon.clone();
-            tokio::spawn(async move {
-                let (r, mut w) = stream.into_split();
-                let mut r = BufReader::new(r);
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match (&mut r).take(MAX_LINE as u64).read_line(&mut line).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(_) => {}
-                    }
-                    let resp = match serde_json::from_str::<Request>(&line) {
-                        Ok(req) => daemon.handle(req).await,
-                        Err(e) => Response::Error { error: ApiError::new("invalid", e.to_string()) },
-                    };
-                    let Ok(mut out) = serde_json::to_vec(&resp) else { return };
-                    out.push(b'\n');
-                    if w.write_all(&out).await.is_err() {
-                        return;
-                    }
-                }
-            });
+            let (r, w) = stream.into_split();
+            tokio::spawn(super::serve_connection(r, w, daemon.clone()));
         }
     }
 
     /// Sends one request and decodes the response data.
     pub async fn call<T: DeserializeOwned>(socket: &Path, req: &Request) -> Result<T> {
-        let stream = UnixStream::connect(socket).await?;
-        let (r, mut w) = stream.into_split();
-        let mut out = serde_json::to_vec(req)?;
-        out.push(b'\n');
-        w.write_all(&out).await?;
-        let mut line = String::new();
-        BufReader::new(r).read_line(&mut line).await?;
-        if line.is_empty() {
-            bail!("service closed the connection");
+        super::exchange(UnixStream::connect(socket).await?, req).await
+    }
+}
+
+#[cfg(windows)]
+pub use windows::{call, serve_pipe};
+
+#[cfg(windows)]
+mod windows {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use anyhow::{Context, Result};
+    use serde::de::DeserializeOwned;
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+
+    use super::Request;
+    use crate::daemon::Daemon;
+
+    /// SYSTEM and administrators get full access; interactive (locally
+    /// logged-on) users may read and write, i.e. use the API.
+    const SDDL_INTERACTIVE: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
+    /// As above, but any user may use the API.
+    const SDDL_EVERYONE: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;WD)";
+
+    fn create(name: &Path, first: bool, allow_all: bool) -> Result<NamedPipeServer> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+        use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
+        let sddl: Vec<u16> =
+            (if allow_all { SDDL_EVERYONE } else { SDDL_INTERACTIVE }).encode_utf16().chain(Some(0)).collect();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `sddl` is NUL-terminated; on success `sd` is allocated by
+        // the system and freed below with LocalFree.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut sd, std::ptr::null_mut())
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error()).context("building pipe security descriptor");
         }
-        match serde_json::from_str::<Response>(&line)? {
-            Response::Ok { data } => Ok(serde_json::from_value(data)?),
-            Response::Error { error } => Err(error.into()),
-        }
+        let mut sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd,
+            bInheritHandle: 0,
+        };
+        // SAFETY: `sa` points to a valid descriptor for the duration of the call.
+        let server = unsafe {
+            ServerOptions::new()
+                .first_pipe_instance(first)
+                .reject_remote_clients(true)
+                .create_with_security_attributes_raw(name.as_os_str(), &mut sa as *mut SECURITY_ATTRIBUTES as *mut _)
+        };
+        // SAFETY: `sd` came from ConvertStringSecurityDescriptor...
+        unsafe { LocalFree(sd as _) };
+        server.with_context(|| format!("creating pipe {}", name.display()))
+    }
+
+    /// Serves API requests on the named pipe `name` until creating a new
+    /// instance fails. The first instance refuses to start if another
+    /// process already owns the name.
+    pub fn serve_pipe(name: &Path, daemon: Daemon, allow_all: bool) -> Result<impl std::future::Future<Output = ()>> {
+        let name = name.to_path_buf();
+        let mut server = create(&name, true, allow_all)?;
+        Ok(async move {
+            loop {
+                if server.connect().await.is_err() {
+                    continue;
+                }
+                let connected = server;
+                server = match create(&name, false, allow_all) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("named pipe stopped: {e:#}");
+                        return;
+                    }
+                };
+                let (r, w) = tokio::io::split(connected);
+                tokio::spawn(super::serve_connection(r, w, daemon.clone()));
+            }
+        })
+    }
+
+    /// Sends one request and decodes the response data.
+    pub async fn call<T: DeserializeOwned>(pipe: &Path, req: &Request) -> Result<T> {
+        const ERROR_PIPE_BUSY: i32 = 231;
+        let mut tries = 0;
+        let client = loop {
+            match ClientOptions::new().open(pipe.as_os_str()) {
+                Ok(c) => break c,
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && tries < 20 => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+        super::exchange(client, req).await
     }
 }
 

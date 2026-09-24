@@ -5,9 +5,11 @@
 
 // Device commands are Linux-only until the Windows/macOS backends land;
 // their helpers are unused elsewhere.
-#![cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
+#![cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code, unreachable_code))]
 
 mod ui;
+#[cfg(windows)]
+mod winservice;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -57,9 +59,39 @@ struct ServeOpts {
     demo: bool,
 }
 
+impl ServeOpts {
+    /// Settings used when started by the Windows service manager.
+    #[cfg(windows)]
+    fn service_defaults() -> Self {
+        ServeOpts {
+            export: vec![],
+            listen: format!("0.0.0.0:{DEFAULT_PORT}"),
+            pair: false,
+            no_mdns: false,
+            allow_all_users: false,
+            demo: false,
+        }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Subcommand)]
+enum ServiceCmd {
+    Install,
+    Uninstall,
+    /// Entry point for the Windows service manager.
+    #[command(hide = true)]
+    Run,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     Daemon(ServeOpts),
+    #[cfg(windows)]
+    Service {
+        #[command(subcommand)]
+        action: ServiceCmd,
+    },
     Serve(ServeOpts),
     Pin {
         #[arg(long, default_value_t = 300)]
@@ -85,6 +117,11 @@ enum Cmd {
     Peers,
     Forget {
         peer: String,
+    },
+    /// Sends a raw JSON request to the running service (for scripts).
+    #[command(hide = true)]
+    Api {
+        request: String,
     },
 }
 
@@ -129,6 +166,14 @@ fn is_root() -> bool {
 }
 
 fn default_state_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        // Shared by the service (LocalSystem) and administrators.
+        let base =
+            std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        return base.join("USB Nexus");
+    }
+    #[allow(unreachable_code)]
     if cfg!(target_os = "linux") && is_root() {
         return PathBuf::from("/var/lib/usbnexus");
     }
@@ -164,17 +209,35 @@ fn main() -> ExitCode {
         Err(e) => e.exit(),
     };
 
-    let filter = if cli.verbose { "usbnexus_core=debug,usbnexus=debug" } else { "error" };
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()))
-        .with_writer(std::io::stderr)
-        .init();
-
     let ctx = Ctx {
         dir: cli.state_dir.clone().unwrap_or_else(default_state_dir),
         name: cli.name.clone().unwrap_or_else(default_name),
         socket: cli.socket.clone().unwrap_or_else(usbnexus_core::api::default_socket),
     };
+
+    let filter = if cli.verbose { "usbnexus_core=debug,usbnexus=debug" } else { "error" };
+    let env_filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into());
+    #[cfg(windows)]
+    if matches!(cli.command, Cmd::Service { action: ServiceCmd::Run }) {
+        // A service has no console: log to a file next to its state.
+        let _ = std::fs::create_dir_all(&ctx.dir);
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(ctx.dir.join("service.log"));
+        if let Ok(file) = file {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new("usbnexus_core=info,usbnexus=info"))
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+        return match winservice::run(ctx) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!("{e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    tracing_subscriber::fmt().with_env_filter(env_filter()).with_writer(std::io::stderr).init();
     let target = match &cli.command {
         Cmd::Pair { server, .. } | Cmd::List { server } | Cmd::Attach { server, .. } => Some(server.clone()),
         _ => None,
@@ -192,7 +255,13 @@ fn main() -> ExitCode {
 
 async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Daemon(opts) | Cmd::Serve(opts) => daemon(ctx, opts).await,
+        Cmd::Daemon(opts) | Cmd::Serve(opts) => run_daemon(ctx, opts, shutdown_signal()).await,
+        #[cfg(windows)]
+        Cmd::Service { action: ServiceCmd::Install } => winservice::install(),
+        #[cfg(windows)]
+        Cmd::Service { action: ServiceCmd::Uninstall } => winservice::uninstall(),
+        #[cfg(windows)]
+        Cmd::Service { action: ServiceCmd::Run } => unreachable!("handled in main"),
         Cmd::Pin { seconds } => pin(ctx, seconds).await,
         Cmd::Local => local(),
         Cmd::Discover { timeout } => discover(ctx, timeout).await,
@@ -201,6 +270,12 @@ async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Attach { server, busid } => attach(ctx, &server, &busid).await,
         Cmd::Peers => peers(ctx),
         Cmd::Forget { peer } => forget(ctx, &peer),
+        Cmd::Api { request } => {
+            let req: usbnexus_core::api::Request = serde_json::from_str(&request).context("parsing request")?;
+            let v: serde_json::Value = usbnexus_core::api::call(&ctx.socket, &req).await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            Ok(())
+        }
     }
 }
 
@@ -233,21 +308,71 @@ fn hex4(v: u16) -> String {
 
 /// Runs the service in the foreground. `serve` is the same with devices to
 /// share given on the command line (they are remembered).
-#[cfg(target_os = "linux")]
-async fn daemon(ctx: &Ctx, opts: ServeOpts) -> Result<()> {
-    use usbnexus_core::api::{self, Request, Response};
+/// Picks the platform backends for the service.
+fn backends(
+    opts: &ServeOpts,
+) -> Result<(Arc<dyn usbnexus_core::backend::DeviceHost>, Arc<dyn usbnexus_core::backend::ImportBackend>)> {
     use usbnexus_core::backend::demo::{DemoHost, DemoImport};
-    use usbnexus_core::backend::{DeviceHost, ImportBackend};
+    if opts.demo {
+        return Ok((Arc::new(DemoHost), Arc::new(DemoImport::default())));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use usbnexus_core::linux::{LinuxHost, LinuxImport};
+        require_root()?;
+        Ok((Arc::new(LinuxHost::new("/sys")), Arc::new(LinuxImport::new("/sys"))))
+    }
+    #[cfg(windows)]
+    {
+        // Sharing devices from Windows (VBoxUSB) is not implemented yet.
+        use usbnexus_core::backend::UnsupportedHost;
+        use usbnexus_core::windows::WindowsImport;
+        Ok((Arc::new(UnsupportedHost), Arc::new(WindowsImport::default())))
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        bail!(t!("unsupported-os"))
+    }
+}
+
+/// Opens the local API endpoint; the returned guard removes it on drop.
+#[cfg(unix)]
+fn serve_api(ctx: &Ctx, opts: &ServeOpts, d: usbnexus_core::daemon::Daemon) -> Result<impl Drop> {
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let socket = ctx.socket.clone();
+    if let Some(dir) = socket.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let _ = std::fs::remove_file(&socket);
+    let listener = tokio::net::UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
+    secure_socket(&socket, opts.allow_all_users)?;
+    tokio::spawn(usbnexus_core::api::serve(listener, d));
+    Ok(Cleanup(socket))
+}
+
+#[cfg(windows)]
+fn serve_api(ctx: &Ctx, opts: &ServeOpts, d: usbnexus_core::daemon::Daemon) -> Result<impl Drop> {
+    struct Nothing;
+    impl Drop for Nothing {
+        fn drop(&mut self) {}
+    }
+    tokio::spawn(usbnexus_core::api::serve_pipe(&ctx.socket, d, opts.allow_all_users)?);
+    Ok(Nothing)
+}
+
+/// Runs the service until `stop` resolves. `serve` is the same with devices
+/// to share given on the command line (they are remembered).
+async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<Output = ()>) -> Result<()> {
+    use usbnexus_core::api::{Request, Response};
     use usbnexus_core::daemon::{Daemon, DaemonOptions};
-    use usbnexus_core::linux::{LinuxHost, LinuxImport};
     use usbnexus_core::server::ServerEvent;
 
-    let (host, import): (Arc<dyn DeviceHost>, Arc<dyn ImportBackend>) = if opts.demo {
-        (Arc::new(DemoHost), Arc::new(DemoImport::default()))
-    } else {
-        require_root()?;
-        (Arc::new(LinuxHost::new("/sys")), Arc::new(LinuxImport::new("/sys")))
-    };
+    let (host, import) = backends(&opts)?;
     let events = Arc::new(|ev: ServerEvent| match ev {
         ServerEvent::Paired { name, .. } => println!("{}", t!("serve-paired", name = name)),
         ServerEvent::PairingFailed { addr } => println!("{}", t!("serve-pairing-failed", addr = addr.to_string())),
@@ -270,15 +395,7 @@ async fn daemon(ctx: &Ctx, opts: ServeOpts) -> Result<()> {
             eprintln!("{}", t!("serve-bind-failed", busid = busid.as_str(), detail = error.message));
         }
     }
-
-    let socket = ctx.socket.clone();
-    if let Some(dir) = socket.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let _ = std::fs::remove_file(&socket);
-    let listener = tokio::net::UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
-    secure_socket(&socket, opts.allow_all_users)?;
-    tokio::spawn(api::serve(listener, d.clone()));
+    let _api = serve_api(ctx, &opts, d.clone())?;
 
     println!("{}", t!("serve-started", name = ctx.name.as_str(), addr = opts.listen.as_str()));
     println!("{}", t!("serve-fingerprint", fp = short_fingerprint(d.server().fingerprint())));
@@ -309,16 +426,10 @@ async fn daemon(ctx: &Ctx, opts: ServeOpts) -> Result<()> {
         println!("{}", t!("serve-pairing-pin", pin = pin, seconds = seconds));
     }
 
-    shutdown_signal().await;
+    stop.await;
     println!("{}", t!("serve-stopping"));
     d.shutdown();
-    let _ = std::fs::remove_file(&socket);
     Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn daemon(_: &Ctx, _: ServeOpts) -> Result<()> {
-    bail!(t!("unsupported-os"))
 }
 
 /// Restricts the API socket: members of the `usbnexus` group (if it exists)
@@ -351,7 +462,6 @@ fn group_id(name: &str) -> Option<u32> {
     })
 }
 
-#[cfg(unix)]
 async fn pin(ctx: &Ctx, seconds: u64) -> Result<()> {
     use usbnexus_core::api::{self, PairingView, Request, StatusView};
     let not_running = |e: anyhow::Error| -> anyhow::Error {
@@ -368,11 +478,6 @@ async fn pin(ctx: &Ctx, seconds: u64) -> Result<()> {
     println!("{}", t!("pin-show", pin = p.pin));
     println!("{}", t!("pin-hint", name = status.name, seconds = p.remaining_secs));
     Ok(())
-}
-
-#[cfg(not(unix))]
-async fn pin(_: &Ctx, _: u64) -> Result<()> {
-    bail!(t!("unsupported-os"))
 }
 
 #[cfg(target_os = "linux")]
@@ -496,12 +601,18 @@ async fn list(ctx: &Ctx, server: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
-    require_root()?;
     let cfg = ctx.client_config()?;
     let target = Target::parse(server, &cfg.trust);
-    let backend = Arc::new(usbnexus_core::linux::LinuxImport::new("/sys"));
+    #[cfg(target_os = "linux")]
+    let backend = {
+        require_root()?;
+        Arc::new(usbnexus_core::linux::LinuxImport::new("/sys"))
+    };
+    #[cfg(windows)]
+    let backend = Arc::new(usbnexus_core::windows::WindowsImport::default());
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let backend: Arc<usbnexus_core::backend::demo::DemoImport> = bail!(t!("unsupported-os"));
     let events = |ev: AttachEvent| match ev {
         AttachEvent::Connecting { addr } => println!("{}", t!("attach-connecting", addr = addr)),
         AttachEvent::Attached { port, .. } => {
@@ -523,11 +634,6 @@ async fn attach(ctx: &Ctx, server: &str, busid: &str) -> Result<()> {
             Ok(())
         }
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn attach(_: &Ctx, _: &str, _: &str) -> Result<()> {
-    bail!(t!("unsupported-os"))
 }
 
 fn peer_rows(store: &TrustStore) -> Vec<Vec<String>> {

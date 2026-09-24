@@ -23,7 +23,7 @@ async fn api(request: serde_json::Value) -> Result<serde_json::Value, ApiError> 
     forward(&request).await
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn forward(request: &Request) -> Result<serde_json::Value, ApiError> {
     let socket = usbnexus_core::api::default_socket();
     match usbnexus_core::api::call::<serde_json::Value>(&socket, request).await {
@@ -36,13 +36,15 @@ async fn forward(request: &Request) -> Result<serde_json::Value, ApiError> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 async fn forward(_request: &Request) -> Result<serde_json::Value, ApiError> {
     Err(ApiError::new("service_unavailable", "the service transport for this platform is not implemented yet"))
 }
 
 #[derive(Serialize)]
 struct UiStrings {
+    /// Operating system (`linux`, `windows`, `macos`), for platform-specific hints.
+    os: &'static str,
     lang: &'static str,
     languages: Vec<(&'static str, &'static str)>,
     messages: BTreeMap<String, String>,
@@ -52,7 +54,12 @@ struct UiStrings {
 #[tauri::command]
 fn ui_strings(lang: Option<String>) -> UiStrings {
     let lang = usbnexus_i18n::detect(lang.as_deref());
-    UiStrings { lang, languages: usbnexus_i18n::languages(), messages: usbnexus_i18n::templates(lang) }
+    UiStrings {
+        os: std::env::consts::OS,
+        lang,
+        languages: usbnexus_i18n::languages(),
+        messages: usbnexus_i18n::templates(lang),
+    }
 }
 
 fn main() {

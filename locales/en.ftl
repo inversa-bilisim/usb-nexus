@@ -15,6 +15,9 @@ arg-verbose = Show detailed log messages.
 cmd-daemon-about = Run the USB Nexus service (used by the desktop app).
 arg-allow-all-users = Let every local user control the service (default: members of the usbnexus group).
 arg-socket = Path of the service's local control socket.
+cmd-service-about = Install or remove the USB Nexus Windows service.
+cmd-install-about = Install the service, start it now and at every boot (run as administrator).
+cmd-uninstall-about = Stop and remove the service.
 cmd-serve-about = Share USB devices of this computer.
 arg-export = Bus ID of a device to share (repeatable). See: usbnexus local
 arg-listen = Address and port to listen on.
@@ -44,6 +47,9 @@ hint-root = This operation needs administrator rights. Try again with sudo.
 unsupported-os = This command is not supported on this operating system yet.
 yes = yes
 no = no
+
+service-installed = The USB Nexus service was installed and started.
+service-removed = The USB Nexus service was removed.
 
 ## Server
 
@@ -117,6 +123,8 @@ err-device-busy = The device is being used by another computer.
 err-internal = The server reported an internal error.
 err-protocol = Unexpected response from the server.
 err-connection-lost = The connection to the computer was lost.
+err-unsupported = This is not available on this operating system yet.
+err-driver-missing = The usbip-win2 driver is not installed. Install it from github.com/vadimgrn/usbip-win2/releases and try again.
 err-unreachable = The computer could not be reached. Check that it is on and connected to the network.
 err-permission-denied = USB Nexus does not have the permissions it needs.
 err-invalid = The request was not understood.
@@ -202,6 +210,7 @@ gui-fingerprint = Fingerprint
 gui-service-down-title = The USB Nexus service is not running
 gui-service-down-body = Start the service; this window connects to it automatically.
 gui-service-down-linux = On Linux run:
+gui-service-down-windows = On Windows, as administrator, run:
 gui-retry = Try again
 gui-details = Details
 err-service-unavailable = The USB Nexus service could not be reached.

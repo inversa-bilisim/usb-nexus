@@ -11,7 +11,7 @@ use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use usbnexus_core::backend::{into_tokio, loopback_pair, ExportBackend, ImportBackend, LocalDevice};
+use usbnexus_core::backend::{into_tokio, loopback_pair, BoxFuture, ExportBackend, ImportBackend, LocalDevice};
 use usbnexus_core::client::{self, AttachEvent, ClientConfig, ClientError, Target};
 use usbnexus_core::control::{ErrorCode, RemoteError};
 use usbnexus_core::identity::Identity;
@@ -72,12 +72,14 @@ struct MockImport {
 }
 
 impl ImportBackend for MockImport {
-    fn attach(&self, _device: &DeviceInfo) -> Result<(u32, TcpStream)> {
-        let (ours, kernel) = loopback_pair()?;
-        self.kernel_ends.lock().unwrap().push(into_tokio(kernel)?);
-        let mut p = self.next_port.lock().unwrap();
-        *p += 1;
-        Ok((*p, into_tokio(ours)?))
+    fn attach<'a>(&'a self, _device: &'a DeviceInfo) -> BoxFuture<'a, Result<(u32, TcpStream)>> {
+        Box::pin(async move {
+            let (ours, kernel) = loopback_pair()?;
+            self.kernel_ends.lock().unwrap().push(into_tokio(kernel)?);
+            let mut p = self.next_port.lock().unwrap();
+            *p += 1;
+            Ok((*p, into_tokio(ours)?))
+        })
     }
 
     fn detach(&self, _port: u32) -> Result<()> {

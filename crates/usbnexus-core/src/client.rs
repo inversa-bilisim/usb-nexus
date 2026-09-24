@@ -289,7 +289,7 @@ pub async fn attach_forever(
             }
         };
 
-        let (port, local) = backend.attach(&device).context("attaching device locally")?;
+        let (port, local) = backend.attach(&device).await.context("attaching device locally")?;
         backoff.reset();
         events(AttachEvent::Attached { port, device: device.clone() });
 

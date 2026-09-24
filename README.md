@@ -18,6 +18,7 @@ Hedefler:
 | `crates/usbnexus-cli` | `usbnexus` komut satırı aracı ve servis |
 | `apps/desktop` | Masaüstü uygulaması (Tauri 2; arayüz `apps/desktop/ui`) |
 | `packaging/linux` | systemd servisi ve elle kurulum notları |
+| `packaging/windows` | Windows hizmeti, NSIS kurulum paketi ayarları |
 | `locales/` | Çeviri dosyaları: `en.ftl`, `tr.ftl` |
 
 ## Diller
@@ -89,10 +90,11 @@ yeniden bulur.
 | Senaryo | Sürücü | Durum |
 |---|---|---|
 | Linux sunucu ↔ Linux istemci | Çekirdekteki `usbip-host` / `vhci-hcd` | Çalışıyor (donanım testi bekliyor) |
+| Windows istemci | usbip-win2 (attestation imzalı, BSD-2) | Yazıldı; gerçek Windows'ta test bekliyor ([ayrıntılar](packaging/windows/README.md)) |
 | Windows sunucu | VBoxUSB (Oracle, Microsoft imzalı, GPL-3.0) | Planlandı |
-| Windows istemci | usbip-win2 (attestation imzalı, BSD-2) | Planlandı |
 | Grafik arayüz (Linux) | Tauri, aynı `locales/` çevirileri | Çalışıyor (demo ile test edildi) |
-| Grafik arayüz (Windows/macOS) | Hizmet için adlandırılmış kanal / yerel soket | Planlandı |
+| Grafik arayüz (Windows) | Hizmetle adlandırılmış kanal (`\\.\pipe\usbnexus`) | Yazıldı; test bekliyor |
+| Grafik arayüz (macOS) | — | Planlandı |
 
 ## Lisans
 

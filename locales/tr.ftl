@@ -12,6 +12,9 @@ arg-verbose = Ayrıntılı günlük mesajlarını göster.
 cmd-daemon-about = USB Nexus hizmetini çalıştır (masaüstü uygulaması bunu kullanır).
 arg-allow-all-users = Hizmeti bu bilgisayardaki tüm kullanıcılar yönetebilsin (varsayılan: usbnexus grubunun üyeleri).
 arg-socket = Hizmetin yerel denetim soketinin yolu.
+cmd-service-about = USB Nexus Windows hizmetini kur veya kaldır.
+cmd-install-about = Hizmeti kur; şimdi ve her açılışta başlat (yönetici olarak çalıştırın).
+cmd-uninstall-about = Hizmeti durdur ve kaldır.
 cmd-serve-about = Bu bilgisayarın USB cihazlarını paylaş.
 arg-export = Paylaşılacak cihazın veri yolu kimliği (birden çok kez verilebilir). Bkz: usbnexus local
 arg-listen = Dinlenecek adres ve bağlantı noktası.
@@ -41,6 +44,9 @@ hint-root = Bu işlem yönetici yetkisi gerektiriyor. sudo ile yeniden deneyin.
 unsupported-os = Bu komut bu işletim sisteminde henüz desteklenmiyor.
 yes = evet
 no = hayır
+
+service-installed = USB Nexus hizmeti kuruldu ve başlatıldı.
+service-removed = USB Nexus hizmeti kaldırıldı.
 
 ## Server
 
@@ -114,6 +120,8 @@ err-device-busy = Cihaz başka bir bilgisayar tarafından kullanılıyor.
 err-internal = Sunucu bir iç hata bildirdi.
 err-protocol = Sunucudan beklenmeyen yanıt alındı.
 err-connection-lost = Bilgisayarla bağlantı koptu.
+err-unsupported = Bu özellik bu işletim sisteminde henüz kullanılamıyor.
+err-driver-missing = usbip-win2 sürücüsü kurulu değil. github.com/vadimgrn/usbip-win2/releases adresinden kurup yeniden deneyin.
 err-unreachable = Bilgisayara ulaşılamadı. Açık ve ağa bağlı olduğundan emin olun.
 err-permission-denied = USB Nexus gerekli izinlere sahip değil.
 err-invalid = İstek anlaşılamadı.
@@ -199,6 +207,7 @@ gui-fingerprint = Parmak izi
 gui-service-down-title = USB Nexus hizmeti çalışmıyor
 gui-service-down-body = Hizmeti başlatın; bu pencere ona kendiliğinden bağlanır.
 gui-service-down-linux = Linux'ta şunu çalıştırın:
+gui-service-down-windows = Windows'ta yönetici olarak şunu çalıştırın:
 gui-retry = Yeniden dene
 gui-details = Ayrıntılar
 err-service-unavailable = USB Nexus hizmetine ulaşılamadı.

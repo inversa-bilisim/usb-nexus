@@ -13,6 +13,7 @@
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 
 const state = {
+  os: "linux",
   lang: null,
   languages: [],
   messages: {},
@@ -34,6 +35,7 @@ function t(id, args = {}) {
 
 async function loadStrings(lang) {
   const s = await invoke("ui_strings", { lang: lang || null });
+  state.os = s.os;
   state.lang = s.lang;
   state.languages = s.languages;
   state.messages = s.messages;
@@ -666,8 +668,9 @@ function pageServiceDown() {
     h("img", { src: "logo.svg", alt: "" }),
     h("h1", {}, t("gui-service-down-title")),
     h("p", {}, t("gui-service-down-body")),
-    h("p", {}, t("gui-service-down-linux")),
-    h("code", {}, "sudo systemctl start usbnexus"),
+    ...(state.os === "windows"
+      ? [h("p", {}, t("gui-service-down-windows")), h("code", {}, "usbnexus service install")]
+      : [h("p", {}, t("gui-service-down-linux")), h("code", {}, "sudo systemctl start usbnexus")]),
     h("div", {}, h("button", { class: "btn primary", onclick: () => refresh() }, t("gui-retry"))),
   );
 }

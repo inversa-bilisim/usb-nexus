@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use usbnexus_proto::{DeviceInfo, InterfaceInfo, Speed};
 
-use crate::backend::{into_tokio, loopback_pair, ExportBackend, ImportBackend, LocalDevice};
+use crate::backend::{into_tokio, loopback_pair, DeviceHost, ImportBackend, LocalDevice};
 
 const STUB_DRIVER: &str = "usbip-host";
 /// `SDEV_ST_AVAILABLE` in the stub driver.
@@ -109,15 +109,15 @@ pub fn list_local(sys: &Path) -> Result<Vec<LocalDevice>> {
     Ok(out)
 }
 
-/// Exports an allow-list of local devices through `usbip-host`.
-pub struct LinuxExport {
+/// Local USB devices, exported through `usbip-host`. Combine with
+/// [`crate::backend::SharedExport`] to choose which devices are offered.
+pub struct LinuxHost {
     sys: PathBuf,
-    busids: Vec<String>,
 }
 
-impl LinuxExport {
-    pub fn new(sys: impl Into<PathBuf>, busids: Vec<String>) -> Self {
-        LinuxExport { sys: sys.into(), busids }
+impl LinuxHost {
+    pub fn new(sys: impl Into<PathBuf>) -> Self {
+        LinuxHost { sys: sys.into() }
     }
 
     fn stub_dir(&self) -> PathBuf {
@@ -143,8 +143,12 @@ impl LinuxExport {
     }
 
     /// Returns a device to its normal driver.
-    pub fn release(&self, busid: &str) -> Result<()> {
-        let current = read_device(&self.sys, busid)?.driver;
+    pub fn unbind(&self, busid: &str) -> Result<()> {
+        let Ok(dev) = read_device(&self.sys, busid) else {
+            // Unplugged: nothing to give back.
+            return Ok(());
+        };
+        let current = dev.driver;
         if current.as_deref() != Some(STUB_DRIVER) {
             return Ok(());
         }
@@ -155,15 +159,16 @@ impl LinuxExport {
     }
 }
 
-impl ExportBackend for LinuxExport {
-    fn list(&self) -> Result<Vec<LocalDevice>> {
-        Ok(self.busids.iter().filter_map(|b| read_device(&self.sys, b).ok()).collect())
+impl DeviceHost for LinuxHost {
+    fn list_all(&self) -> Result<Vec<LocalDevice>> {
+        list_local(&self.sys)
+    }
+
+    fn release(&self, busid: &str) -> Result<()> {
+        self.unbind(busid)
     }
 
     fn export(&self, busid: &str) -> Result<tokio::net::TcpStream> {
-        if !self.busids.iter().any(|b| b == busid) {
-            bail!("{busid} is not exported");
-        }
         self.bind(busid)?;
         let dev = self.sys.join("bus/usb/devices").join(busid);
         let status = read_attr(&dev, "usbip_status").unwrap_or_default();
@@ -267,6 +272,8 @@ impl ImportBackend for LinuxImport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{ExportBackend, SharedExport};
+    use std::sync::Arc;
 
     fn fake_device(sys: &Path, busid: &str) {
         let d = sys.join("bus/usb/devices").join(busid);
@@ -314,8 +321,9 @@ mod tests {
         assert_eq!(d.info.interfaces, vec![InterfaceInfo { class: 8, subclass: 6, protocol: 0x50 }]);
         assert_eq!(d.product.as_deref(), Some("Cruzer Blade"));
 
-        let export = LinuxExport::new(tmp.path(), vec!["1-2".into(), "9-9".into()]);
-        assert_eq!(export.list().unwrap().len(), 1, "missing devices are skipped");
+        let shared = SharedExport::new(Arc::new(LinuxHost::new(tmp.path())), ["1-2".into(), "9-9".into()]);
+        assert_eq!(shared.list().unwrap().len(), 1, "missing devices are skipped");
+        assert!(shared.export("3-3").is_err(), "unshared devices are refused");
     }
 
     #[test]
@@ -363,7 +371,7 @@ mod tests {
         let err = LinuxImport::new(tmp.path()).ports().unwrap_err().to_string();
         assert!(err.contains("modprobe vhci-hcd"));
         fake_device(tmp.path(), "1-2");
-        let err = LinuxExport::new(tmp.path(), vec!["1-2".into()]).bind("1-2").unwrap_err().to_string();
+        let err = LinuxHost::new(tmp.path()).bind("1-2").unwrap_err().to_string();
         assert!(err.contains("modprobe usbip-host"));
     }
 }

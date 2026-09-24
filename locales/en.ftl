@@ -12,6 +12,9 @@ arg-state-dir = Directory for keys and paired computers.
 arg-name = Name of this computer as shown to others.
 arg-verbose = Show detailed log messages.
 
+cmd-daemon-about = Run the USB Nexus service (used by the desktop app).
+arg-allow-all-users = Let every local user control the service (default: members of the usbnexus group).
+arg-socket = Path of the service's local control socket.
 cmd-serve-about = Share USB devices of this computer.
 arg-export = Bus ID of a device to share (repeatable). See: usbnexus local
 arg-listen = Address and port to listen on.
@@ -113,6 +116,10 @@ err-no-such-device = The server does not share this device.
 err-device-busy = The device is being used by another computer.
 err-internal = The server reported an internal error.
 err-protocol = Unexpected response from the server.
+err-unreachable = The computer could not be reached. Check that it is on and connected to the network.
+err-permission-denied = USB Nexus does not have the permissions it needs.
+err-invalid = The request was not understood.
+err-other = Something went wrong: { $detail }
 
 ## Help layout
 

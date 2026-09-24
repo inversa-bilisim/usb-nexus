@@ -9,6 +9,9 @@ arg-state-dir = Anahtarların ve eşleştirilmiş bilgisayarların tutulduğu kl
 arg-name = Bu bilgisayarın diğerlerine görünen adı.
 arg-verbose = Ayrıntılı günlük mesajlarını göster.
 
+cmd-daemon-about = USB Nexus hizmetini çalıştır (masaüstü uygulaması bunu kullanır).
+arg-allow-all-users = Hizmeti bu bilgisayardaki tüm kullanıcılar yönetebilsin (varsayılan: usbnexus grubunun üyeleri).
+arg-socket = Hizmetin yerel denetim soketinin yolu.
 cmd-serve-about = Bu bilgisayarın USB cihazlarını paylaş.
 arg-export = Paylaşılacak cihazın veri yolu kimliği (birden çok kez verilebilir). Bkz: usbnexus local
 arg-listen = Dinlenecek adres ve bağlantı noktası.
@@ -110,6 +113,10 @@ err-no-such-device = Sunucu bu cihazı paylaşmıyor.
 err-device-busy = Cihaz başka bir bilgisayar tarafından kullanılıyor.
 err-internal = Sunucu bir iç hata bildirdi.
 err-protocol = Sunucudan beklenmeyen yanıt alındı.
+err-unreachable = Bilgisayara ulaşılamadı. Açık ve ağa bağlı olduğundan emin olun.
+err-permission-denied = USB Nexus gerekli izinlere sahip değil.
+err-invalid = İstek anlaşılamadı.
+err-other = Bir şeyler ters gitti: { $detail }
 
 ## Help layout
 

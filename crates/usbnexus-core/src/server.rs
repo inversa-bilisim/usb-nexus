@@ -3,7 +3,7 @@
 
 //! USB Nexus server: authenticates clients and exports local USB devices.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -52,7 +52,8 @@ struct Inner {
     trust: TrustStore,
     backend: Arc<dyn ExportBackend>,
     pairing: Mutex<Option<PairingWindow>>,
-    in_use: Mutex<HashSet<String>>,
+    /// busid -> name of the client using it.
+    in_use: Mutex<HashMap<String, String>>,
     events: EventSink,
 }
 
@@ -76,7 +77,7 @@ impl Server {
                 trust: cfg.trust,
                 backend: cfg.backend,
                 pairing: Mutex::new(None),
-                in_use: Mutex::new(HashSet::new()),
+                in_use: Mutex::new(HashMap::new()),
                 events,
             }),
         })
@@ -105,6 +106,18 @@ impl Server {
 
     pub fn close_pairing(&self) {
         *self.inner.pairing.lock().unwrap() = None;
+    }
+
+    /// Devices currently used by clients: busid -> client name.
+    pub fn in_use(&self) -> HashMap<String, String> {
+        self.inner.in_use.lock().unwrap().clone()
+    }
+
+    /// Remaining PIN and lifetime of an open pairing window.
+    pub fn pairing(&self) -> Option<(String, Duration)> {
+        let guard = self.inner.pairing.lock().unwrap();
+        let w = guard.as_ref().filter(|w| w.is_active())?;
+        Some((w.pin.clone(), w.expires.saturating_duration_since(std::time::Instant::now())))
     }
 
     pub fn pairing_open(&self) -> bool {
@@ -194,7 +207,7 @@ async fn handle(inner: Arc<Inner>, tcp: TcpStream, addr: SocketAddr) -> Result<(
                 let devices = devices
                     .into_iter()
                     .map(|d| ExportedDevice {
-                        in_use: in_use.contains(&d.info.busid),
+                        in_use: in_use.contains_key(&d.info.busid),
                         info: d.info,
                         product: d.product,
                         manufacturer: d.manufacturer,
@@ -262,7 +275,7 @@ where
 
 /// Removes a busid from the in-use set when dropped.
 struct InUse<'a> {
-    set: &'a Mutex<HashSet<String>>,
+    set: &'a Mutex<HashMap<String, String>>,
     busid: String,
 }
 
@@ -280,7 +293,11 @@ where
         Some(d) => d,
         None => return send_error(&mut tls, ErrorCode::NoSuchDevice, format!("{busid} is not exported")).await,
     };
-    if !inner.in_use.lock().unwrap().insert(busid.to_string()) {
+    let claimed = {
+        let mut in_use = inner.in_use.lock().unwrap();
+        !in_use.contains_key(busid) && in_use.insert(busid.to_string(), client_name.to_string()).is_none()
+    };
+    if !claimed {
         return send_error(&mut tls, ErrorCode::DeviceBusy, format!("{busid} is in use")).await;
     }
     let _guard = InUse { set: &inner.in_use, busid: busid.to_string() };

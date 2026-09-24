@@ -4,6 +4,7 @@
 //! Terminal presentation: localized help, tables and error messages.
 
 use clap::{Arg, ArgAction, Command};
+use usbnexus_core::api::ApiError;
 use usbnexus_core::client::ClientError;
 use usbnexus_core::control::{ErrorCode, RemoteError};
 use usbnexus_i18n::{global, t};
@@ -116,6 +117,12 @@ pub fn describe(e: &anyhow::Error, target: Option<&str>) -> String {
     }
     if let Some(r) = e.downcast_ref::<RemoteError>() {
         return t!(remote_key(r.code));
+    }
+    if let Some(a) = e.downcast_ref::<ApiError>() {
+        let key = format!("err-{}", a.code.replace('_', "-"));
+        if a.code != "other" && a.code != "pairing_required" && global().has(&key) {
+            return global().format(&key, None);
+        }
     }
     let mut msg = t!("error-prefix", detail = format!("{e:#}"));
     if permission_denied(e) {

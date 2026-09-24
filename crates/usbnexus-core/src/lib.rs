@@ -13,10 +13,12 @@
 //! * LAN discovery over mDNS ([`discovery`]),
 //! * automatic reconnection ([`client::attach_forever`], [`backoff`]).
 
+pub mod api;
 pub mod backend;
 pub mod backoff;
 pub mod client;
 pub mod control;
+pub mod daemon;
 pub mod discovery;
 pub mod frame;
 pub mod identity;

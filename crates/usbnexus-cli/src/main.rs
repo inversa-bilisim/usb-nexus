@@ -7,8 +7,6 @@
 // their helpers are unused elsewhere.
 #![cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
 
-#[cfg(unix)]
-mod admin;
 mod ui;
 
 use std::io::Write;
@@ -34,24 +32,35 @@ struct Cli {
     state_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     name: Option<String>,
+    #[arg(long, global = true, value_name = "PATH")]
+    socket: Option<PathBuf>,
     #[arg(short, long, global = true)]
     verbose: bool,
     #[command(subcommand)]
     command: Cmd,
 }
 
+#[derive(clap::Args)]
+struct ServeOpts {
+    #[arg(long, value_name = "BUSID")]
+    export: Vec<String>,
+    #[arg(long, value_name = "ADDR", default_value_t = format!("0.0.0.0:{DEFAULT_PORT}"))]
+    listen: String,
+    #[arg(long)]
+    pair: bool,
+    #[arg(long)]
+    no_mdns: bool,
+    #[arg(long)]
+    allow_all_users: bool,
+    /// Simulated devices, for trying the interface without hardware.
+    #[arg(long, hide = true)]
+    demo: bool,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
-    Serve {
-        #[arg(long, value_name = "BUSID")]
-        export: Vec<String>,
-        #[arg(long, value_name = "ADDR", default_value_t = format!("0.0.0.0:{DEFAULT_PORT}"))]
-        listen: String,
-        #[arg(long)]
-        pair: bool,
-        #[arg(long)]
-        no_mdns: bool,
-    },
+    Daemon(ServeOpts),
+    Serve(ServeOpts),
     Pin {
         #[arg(long, default_value_t = 300)]
         seconds: u64,
@@ -83,6 +92,8 @@ enum Cmd {
 struct Ctx {
     dir: PathBuf,
     name: String,
+    /// Local API socket of the service.
+    socket: PathBuf,
 }
 
 impl Ctx {
@@ -102,11 +113,6 @@ impl Ctx {
 
     fn client_config(&self) -> Result<ClientConfig> {
         Ok(ClientConfig { name: self.name.clone(), identity: self.identity()?, trust: self.servers()? })
-    }
-
-    #[cfg(unix)]
-    fn admin_socket(&self) -> PathBuf {
-        self.dir.join("admin.sock")
     }
 }
 
@@ -167,6 +173,7 @@ fn main() -> ExitCode {
     let ctx = Ctx {
         dir: cli.state_dir.clone().unwrap_or_else(default_state_dir),
         name: cli.name.clone().unwrap_or_else(default_name),
+        socket: cli.socket.clone().unwrap_or_else(usbnexus_core::api::default_socket),
     };
     let target = match &cli.command {
         Cmd::Pair { server, .. } | Cmd::List { server } | Cmd::Attach { server, .. } => Some(server.clone()),
@@ -185,7 +192,7 @@ fn main() -> ExitCode {
 
 async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Serve { export, listen, pair, no_mdns } => serve(ctx, export, &listen, pair, no_mdns).await,
+        Cmd::Daemon(opts) | Cmd::Serve(opts) => daemon(ctx, opts).await,
         Cmd::Pin { seconds } => pin(ctx, seconds).await,
         Cmd::Local => local(),
         Cmd::Discover { timeout } => discover(ctx, timeout).await,
@@ -224,113 +231,143 @@ fn hex4(v: u16) -> String {
     format!("{v:04x}")
 }
 
+/// Runs the service in the foreground. `serve` is the same with devices to
+/// share given on the command line (they are remembered).
 #[cfg(target_os = "linux")]
-async fn serve(ctx: &Ctx, export: Vec<String>, listen: &str, pair: bool, no_mdns: bool) -> Result<()> {
-    use usbnexus_core::linux::{read_device, LinuxExport};
-    use usbnexus_core::server::{Server, ServerConfig, ServerEvent};
+async fn daemon(ctx: &Ctx, opts: ServeOpts) -> Result<()> {
+    use usbnexus_core::api::{self, Request, Response};
+    use usbnexus_core::backend::demo::{DemoHost, DemoImport};
+    use usbnexus_core::backend::{DeviceHost, ImportBackend};
+    use usbnexus_core::daemon::{Daemon, DaemonOptions};
+    use usbnexus_core::linux::{LinuxHost, LinuxImport};
+    use usbnexus_core::server::ServerEvent;
 
-    require_root()?;
-    let sys = Path::new("/sys");
-    let identity = ctx.identity()?;
-    let backend = Arc::new(LinuxExport::new(sys, export.clone()));
+    let (host, import): (Arc<dyn DeviceHost>, Arc<dyn ImportBackend>) = if opts.demo {
+        (Arc::new(DemoHost), Arc::new(DemoImport::default()))
+    } else {
+        require_root()?;
+        (Arc::new(LinuxHost::new("/sys")), Arc::new(LinuxImport::new("/sys")))
+    };
     let events = Arc::new(|ev: ServerEvent| match ev {
         ServerEvent::Paired { name, .. } => println!("{}", t!("serve-paired", name = name)),
         ServerEvent::PairingFailed { addr } => println!("{}", t!("serve-pairing-failed", addr = addr.to_string())),
         ServerEvent::Exported { busid, client } => println!("{}", t!("serve-exported", busid = busid, client = client)),
         ServerEvent::Released { busid, client } => println!("{}", t!("serve-released", busid = busid, client = client)),
     });
-    let server = Server::with_events(
-        ServerConfig {
-            name: ctx.name.clone(),
-            identity: identity.clone(),
-            trust: ctx.clients()?,
-            backend: backend.clone(),
-        },
-        events,
-    )?;
+    let d = Daemon::start(DaemonOptions {
+        state_dir: ctx.dir.clone(),
+        name: ctx.name.clone(),
+        listen: opts.listen.clone(),
+        mdns: !opts.no_mdns,
+        host,
+        import,
+        events: Some(events),
+    })
+    .await?;
 
-    let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("listening on {listen}"))?;
-    let port = listener.local_addr()?.port();
-    println!("{}", t!("serve-started", name = ctx.name.as_str(), addr = listen));
-    println!("{}", t!("serve-fingerprint", fp = short_fingerprint(server.fingerprint())));
+    for busid in &opts.export {
+        if let Response::Error { error } = d.handle(Request::SetShared { busid: busid.clone(), shared: true }).await {
+            eprintln!("{}", t!("serve-bind-failed", busid = busid.as_str(), detail = error.message));
+        }
+    }
 
-    if export.is_empty() {
+    let socket = ctx.socket.clone();
+    if let Some(dir) = socket.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let _ = std::fs::remove_file(&socket);
+    let listener = tokio::net::UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
+    secure_socket(&socket, opts.allow_all_users)?;
+    tokio::spawn(api::serve(listener, d.clone()));
+
+    println!("{}", t!("serve-started", name = ctx.name.as_str(), addr = opts.listen.as_str()));
+    println!("{}", t!("serve-fingerprint", fp = short_fingerprint(d.server().fingerprint())));
+    let shared: Vec<Vec<String>> = match d.handle(Request::LocalDevices).await {
+        Response::Ok { data } => serde_json::from_value::<Vec<usbnexus_core::api::LocalDeviceView>>(data)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|v| v.shared)
+            .map(|v| {
+                vec![
+                    v.busid,
+                    format!("{}:{}", hex4(v.vendor_id), hex4(v.product_id)),
+                    [v.manufacturer, v.product].into_iter().flatten().collect::<Vec<_>>().join(" "),
+                ]
+            })
+            .collect(),
+        Response::Error { .. } => vec![],
+    };
+    if shared.is_empty() {
         println!("{}", t!("serve-no-exports"));
     } else {
         println!("{}", t!("serve-exporting"));
-        let rows: Vec<Vec<String>> = export
-            .iter()
-            .map(|b| match read_device(sys, b) {
-                Ok(d) => vec![
-                    b.clone(),
-                    format!("{}:{}", hex4(d.info.id_vendor), hex4(d.info.id_product)),
-                    d.product.unwrap_or_default(),
-                ],
-                Err(e) => vec![b.clone(), "-".into(), format!("{e:#}")],
-            })
-            .collect();
-        ui::table(&[t!("col-busid"), t!("col-id"), t!("col-product")], &rows);
+        ui::table(&[t!("col-busid"), t!("col-id"), t!("col-product")], &shared);
     }
-
-    let _mdns = if no_mdns {
-        None
-    } else {
-        match discovery::advertise(&ctx.name, port, server.fingerprint()) {
-            Ok(a) => Some(a),
-            Err(e) => {
-                println!("{}", t!("serve-mdns-failed", detail = format!("{e:#}")));
-                None
-            }
-        }
-    };
-
-    admin::listen(&ctx.admin_socket(), server.clone())?;
-    if pair {
+    if opts.pair {
         let seconds = 300;
-        let pin = server.open_pairing(Duration::from_secs(seconds));
+        let pin = d.server().open_pairing(Duration::from_secs(seconds));
         println!("{}", t!("serve-pairing-pin", pin = pin, seconds = seconds));
     }
 
-    let result = tokio::select! {
-        r = server.serve(listener) => r,
-        _ = shutdown_signal() => Ok(()),
-    };
+    shutdown_signal().await;
     println!("{}", t!("serve-stopping"));
-    for b in &export {
-        if let Err(e) = backend.release(b) {
-            eprintln!("{}", t!("serve-bind-failed", busid = b.as_str(), detail = format!("{e:#}")));
-        }
-    }
-    let _ = std::fs::remove_file(ctx.admin_socket());
-    result
+    d.shutdown();
+    let _ = std::fs::remove_file(&socket);
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn serve(_: &Ctx, _: Vec<String>, _: &str, _: bool, _: bool) -> Result<()> {
+async fn daemon(_: &Ctx, _: ServeOpts) -> Result<()> {
     bail!(t!("unsupported-os"))
+}
+
+/// Restricts the API socket: members of the `usbnexus` group (if it exists)
+/// may use it, or everyone with `--allow-all-users`; otherwise only root.
+#[cfg(unix)]
+fn secure_socket(path: &Path, allow_all: bool) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if allow_all {
+        0o666
+    } else if let Some(gid) = group_id("usbnexus") {
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+        // SAFETY: `c` is a valid NUL-terminated path; -1 keeps the owner.
+        if unsafe { libc::chown(c.as_ptr(), u32::MAX, gid) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("setting socket group");
+        }
+        0o660
+    } else {
+        0o600
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn group_id(name: &str) -> Option<u32> {
+    std::fs::read_to_string("/etc/group").ok()?.lines().find_map(|l| {
+        let mut f = l.split(':');
+        (f.next()? == name).then(|| f.nth(1)?.parse().ok()).flatten()
+    })
 }
 
 #[cfg(unix)]
 async fn pin(ctx: &Ctx, seconds: u64) -> Result<()> {
-    use admin::{Reply, Request};
-    let reply = match admin::request(&ctx.admin_socket(), &Request::OpenPairing { seconds }).await {
-        Ok(r) => r,
-        Err(e)
-            if e.downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
-        {
-            return Err(e)
+    use usbnexus_core::api::{self, PairingView, Request, StatusView};
+    let not_running = |e: anyhow::Error| -> anyhow::Error {
+        let denied =
+            e.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied);
+        if denied {
+            e
+        } else {
+            anyhow::anyhow!(t!("pin-no-server"))
         }
-        Err(_) => bail!(t!("pin-no-server")),
     };
-    match reply {
-        Reply::Pairing { pin, seconds, name } => {
-            println!("{}", t!("pin-show", pin = pin));
-            println!("{}", t!("pin-hint", name = name, seconds = seconds));
-            Ok(())
-        }
-        Reply::Error { message } => bail!(message),
-    }
+    let status: StatusView = api::call(&ctx.socket, &Request::Status).await.map_err(not_running)?;
+    let p: PairingView = api::call(&ctx.socket, &Request::OpenPairing { seconds }).await?;
+    println!("{}", t!("pin-show", pin = p.pin));
+    println!("{}", t!("pin-hint", name = status.name, seconds = p.remaining_secs));
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -393,8 +430,8 @@ async fn discover(ctx: &Ctx, timeout: u64) -> Result<()> {
 /// Resolves a server for pairing: a paired peer, a server announced on the
 /// LAN under that name, or a plain address.
 async fn resolve_new(server: &str, trust: &TrustStore) -> Result<String> {
-    if let Target::Peer { .. } = Target::parse(server, trust) {
-        return Target::parse(server, trust).resolve(trust).await;
+    if let Some(addr) = trust.find(server).and_then(|p| p.last_addr) {
+        return Ok(addr);
     }
     if let Ok(found) = discovery::browse(Duration::from_secs(2)).await {
         if let Some(d) = found.into_iter().find(|d| d.name.eq_ignore_ascii_case(server)) {
@@ -436,8 +473,7 @@ async fn pair(ctx: &Ctx, server: &str, pin: Option<String>) -> Result<()> {
 
 async fn list(ctx: &Ctx, server: &str) -> Result<()> {
     let cfg = ctx.client_config()?;
-    let addr = Target::parse(server, &cfg.trust).resolve(&cfg.trust).await?;
-    let mut s = client::connect(&cfg, &addr, None).await?;
+    let mut s = Target::parse(server, &cfg.trust).connect(&cfg, &|_| {}).await?;
     let devices = s.list().await?;
     if devices.is_empty() {
         println!("{}", t!("list-empty"));

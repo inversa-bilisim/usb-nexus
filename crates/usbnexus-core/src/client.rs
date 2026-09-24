@@ -182,25 +182,46 @@ impl Target {
         }
     }
 
-    pub async fn resolve(&self, trust: &TrustStore) -> Result<String> {
-        match self {
-            Target::Addr(a) => Ok(a.clone()),
-            Target::Peer { fingerprint } => {
-                match discovery::find(fingerprint, Duration::from_secs(2)).await {
-                    Ok(Some(found)) => {
-                        if let Some(a) = found.addrs.first() {
-                            return Ok(a.to_string());
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => debug!("mDNS lookup failed: {e:#}"),
-                }
-                trust
-                    .get(fingerprint)
-                    .and_then(|p| p.last_addr)
-                    .ok_or_else(|| ClientError::NotFound(fingerprint.clone()).into())
+    /// Connects to the target. For a paired peer the last known address is
+    /// tried first; if it is unreachable the peer is looked up via mDNS. The
+    /// server must present the expected fingerprint.
+    pub async fn connect(&self, cfg: &ClientConfig, events: &impl Fn(AttachEvent)) -> Result<Session> {
+        let fingerprint = match self {
+            Target::Addr(a) => {
+                events(AttachEvent::Connecting { addr: a.clone() });
+                return connect(cfg, a, None).await;
+            }
+            Target::Peer { fingerprint } => fingerprint,
+        };
+        let check = |s: Session| -> Result<Session> {
+            if s.server_fingerprint != *fingerprint {
+                return Err(ClientError::NotFound(fingerprint.clone()).into());
+            }
+            Ok(s)
+        };
+        let last = cfg.trust.get(fingerprint).and_then(|p| p.last_addr);
+        let mut last_err = None;
+        if let Some(addr) = &last {
+            events(AttachEvent::Connecting { addr: addr.clone() });
+            match connect(cfg, addr, None).await.and_then(check) {
+                Ok(s) => return Ok(s),
+                Err(e) => last_err = Some(e),
             }
         }
+        match discovery::find(fingerprint, Duration::from_secs(3)).await {
+            Ok(Some(found)) => {
+                for addr in found.addrs.iter().map(|a| a.to_string()).filter(|a| Some(a) != last.as_ref()) {
+                    events(AttachEvent::Connecting { addr: addr.clone() });
+                    match connect(cfg, &addr, None).await.and_then(check) {
+                        Ok(s) => return Ok(s),
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => debug!("mDNS lookup failed: {e:#}"),
+        }
+        Err(last_err.unwrap_or_else(|| ClientError::NotFound(fingerprint.clone()).into()))
     }
 }
 
@@ -251,9 +272,7 @@ pub async fn attach_forever(
     let mut backoff = Backoff::default();
     loop {
         let attempt = async {
-            let addr = target.resolve(&cfg.trust).await?;
-            events(AttachEvent::Connecting { addr: addr.clone() });
-            let session = connect(cfg, &addr, None).await?;
+            let session = target.connect(cfg, &events).await?;
             session.import(busid).await
         };
         let (device, stream) = match attempt.await {

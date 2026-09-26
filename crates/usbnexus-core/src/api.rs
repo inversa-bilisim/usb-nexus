@@ -461,19 +461,33 @@ mod windows {
         let mut server = create(&name, true, allow_all)?;
         Ok(async move {
             loop {
-                if server.connect().await.is_err() {
-                    continue;
-                }
-                let connected = server;
-                server = match create(&name, false, allow_all) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("named pipe stopped: {e:#}");
-                        return;
+                let connected = server.connect().await;
+                // Every connection attempt, failed or not, uses up this pipe
+                // instance: a failed one (e.g. ERROR_NO_DATA when a client
+                // closed before we accepted it) fails again immediately and
+                // without yielding, which would spin forever and starve the
+                // runtime. Always continue with a fresh instance.
+                let next = loop {
+                    match create(&name, false, allow_all) {
+                        Ok(s) => break s,
+                        Err(e) => {
+                            tracing::error!("creating the named pipe failed: {e:#}");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
                     }
                 };
-                let (r, w) = tokio::io::split(connected);
-                tokio::spawn(super::serve_connection(r, w, daemon.clone()));
+                let used = std::mem::replace(&mut server, next);
+                match connected {
+                    Ok(()) => {
+                        let (r, w) = tokio::io::split(used);
+                        tokio::spawn(super::serve_connection(r, w, daemon.clone()));
+                    }
+                    Err(e) => {
+                        tracing::debug!("named pipe client went away: {e}");
+                        drop(used);
+                        tokio::task::yield_now().await;
+                    }
+                }
             }
         })
     }

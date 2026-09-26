@@ -122,14 +122,14 @@ impl ImportBackend for WindowsImport {
     }
 
     fn detach(&self, port: u32) -> Result<()> {
+        // Called from async code: start usbip.exe without waiting for it, so
+        // a slow or stuck detach cannot block a runtime thread.
         let exe = self.usbip_exe()?;
-        let status = std::process::Command::new(exe)
+        std::process::Command::new(exe)
             .args(["detach", "-p", &port.to_string()])
             .creation_flags(CREATE_NO_WINDOW)
-            .status()?;
-        if !status.success() {
-            bail!("usbip.exe detach -p {port} failed");
-        }
+            .spawn()
+            .with_context(|| format!("running usbip.exe detach -p {port}"))?;
         Ok(())
     }
 }

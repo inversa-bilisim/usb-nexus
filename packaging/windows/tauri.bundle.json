@@ -15,7 +15,8 @@
           "Turkish"
         ],
         "displayLanguageSelector": false,
-        "installerHooks": "../../../packaging/windows/hooks.nsh"
+        "installerHooks": "../../../packaging/windows/hooks.nsh",
+        "template": "../../../packaging/windows/installer.nsi"
       }
     },
     "resources": {

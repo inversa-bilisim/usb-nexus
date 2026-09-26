@@ -1,11 +1,18 @@
 ; SPDX-License-Identifier: GPL-3.0-or-later
 ; NSIS hooks for the USB Nexus installer (Tauri). The service executable is
 ; bundled as a sidecar and installed next to the app as usbnexus.exe.
+;
+; Included near the top of installer.nsi (before its variables and
+; languages): only defines and functions that need neither go here. The
+; pages and everything using their choices live in usbnexus-pages.nsh, and the
+; translated texts in usbnexus-strings.nsh (generated from locales/*.ftl).
+
+!define USBNEXUS_DIR "${__FILEDIR__}"
 
 ; usbip-win2 (BSD-2-Clause) attaches remote devices on Windows. Its installer
-; is bundled (see fetch-usbip-win2.ps1) and offered when it is missing or
-; older than the oldest version whose usbip.exe has the options we use
-; (`attach --once`, added in 0.9.7.6).
+; is bundled (see fetch-usbip-win2.ps1) and installed for the client role
+; when missing or older than the oldest version whose usbip.exe has the
+; options we use (`attach --once`, added in 0.9.7.6).
 !define USBIP_WIN2_MIN_VERSION "0.9.7.6"
 !define USBIP_WIN2_SETUP "$INSTDIR\usbip-win2\usbip-win2-setup.exe"
 ; Inno Setup uninstall key (usbip-win2's AppId).
@@ -34,41 +41,29 @@ Function usbnexus_usbip_win2_version
   ${EndIf}
 FunctionEnd
 
-Function usbnexus_usbip_win2
+; Sets $R0 to what the client role needs: 0 nothing, 1 install usbip-win2,
+; 2 update it.
+Function usbnexus_usbip_win2_need
   Call usbnexus_usbip_win2_version
-  ${If} $R0 != ""
+  ${If} $R0 == ""
+    StrCpy $R0 1
+  ${Else}
     ${VersionCompare} $R0 "${USBIP_WIN2_MIN_VERSION}" $R1
     ; 2 = the installed version is older than the minimum.
-    ${If} $R1 != 2
-      DetailPrint "usbip-win2 $R0 is already installed."
-      Return
-    ${EndIf}
-    StrCpy $0 "usbip-win2 $R0 is installed on this computer, but USB Nexus needs version ${USBIP_WIN2_MIN_VERSION} or later to use remote USB devices.$\r$\n$\r$\nUpdate it with the version included in this setup?"
-    ; 1055 = Turkish
-    ${If} $LANGUAGE == 1055
-      StrCpy $0 "Bu bilgisayarda usbip-win2 $R0 kurulu, ancak USB Nexus uzak USB cihazlarını kullanmak için ${USBIP_WIN2_MIN_VERSION} veya daha yeni bir sürüm gerektirir.$\r$\n$\r$\nBu kurulumla gelen sürüme güncellensin mi?"
-    ${EndIf}
-  ${Else}
-    StrCpy $0 "To use USB devices of other computers on this computer, the usbip-win2 driver is required. It is included in this setup.$\r$\n$\r$\nInstall it now?"
-    ${If} $LANGUAGE == 1055
-      StrCpy $0 "Başka bilgisayarlardaki USB cihazlarını bu bilgisayarda kullanmak için usbip-win2 sürücüsü gerekir. Sürücü bu kurulumla birlikte geliyor.$\r$\n$\r$\nŞimdi kurulsun mu?"
+    ${If} $R1 == 2
+      StrCpy $R0 2
+    ${Else}
+      StrCpy $R0 0
     ${EndIf}
   ${EndIf}
+FunctionEnd
 
+; Installs the bundled usbip-win2 silently (the role page told the user).
+Function usbnexus_usbip_win2_install
   ${IfNot} ${FileExists} "${USBIP_WIN2_SETUP}"
     DetailPrint "usbip-win2 setup is not bundled; skipping."
     Return
   ${EndIf}
-
-  StrCpy $1 "$\r$\n$\r$\nUSB devices plugged into this computer stop for a few seconds during the installation, and Windows must be restarted afterwards."
-  ${If} $LANGUAGE == 1055
-    StrCpy $1 "$\r$\n$\r$\nKurulum sırasında bu bilgisayara takılı USB cihazları birkaç saniye çalışmaz; sonrasında Windows'un yeniden başlatılması gerekir."
-  ${EndIf}
-  ; Silent installs (/S) skip it: restarting the USB hubs must be a choice.
-  MessageBox MB_YESNO|MB_ICONQUESTION "$0$1" /SD IDNO IDYES usbnexus_usbip_win2_install
-  Return
-
-  usbnexus_usbip_win2_install:
   DetailPrint "Installing usbip-win2..."
   ClearErrors
   ExecWait '"${USBIP_WIN2_SETUP}" /SILENT /SUPPRESSMSGBOXES /NOCANCEL /SP- /NORESTART /RESTARTEXITCODE=3010 /CLOSEAPPLICATIONS /COMPONENTS="main,client" /TASKS="vcredist"' $R1
@@ -81,11 +76,8 @@ Function usbnexus_usbip_win2
   ${ElseIf} $R1 == 0
     DetailPrint "usbip-win2 installed."
   ${Else}
-    StrCpy $0 "usbip-win2 could not be installed (exit code $R1). You can run the USB Nexus setup again later to retry."
-    ${If} $LANGUAGE == 1055
-      StrCpy $0 "usbip-win2 kurulamadı (çıkış kodu $R1). Daha sonra USB Nexus kurulumunu yeniden çalıştırarak tekrar deneyebilirsiniz."
-    ${EndIf}
-    MessageBox MB_OK|MB_ICONEXCLAMATION "$0" /SD IDOK
+    DetailPrint "usbip-win2 setup failed with exit code $R1."
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(setup_usbip_failed)" /SD IDOK
   ${EndIf}
 FunctionEnd
 
@@ -103,11 +95,8 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  ; Register and start the background service (runs as LocalSystem).
-  nsExec::ExecToLog '"$INSTDIR\usbnexus.exe" service install'
-
-  ; Remote devices need the signed usbip-win2 driver.
-  Call usbnexus_usbip_win2
+  ; Service, roles, web interface and usbip-win2 (usbnexus-pages.nsh).
+  Call usbnexus_Configure
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

@@ -166,6 +166,9 @@ pub struct PairingView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusView {
     pub name: String,
+    /// What this computer is set up for; interfaces hide the other screens.
+    #[serde(default)]
+    pub roles: Roles,
     pub fingerprint: String,
     pub version: String,
     pub listen: String,
@@ -175,6 +178,22 @@ pub struct StatusView {
     /// Whether the policy was chosen explicitly (user interfaces ask on
     /// first run otherwise).
     pub policy_chosen: bool,
+}
+
+/// What a computer is set up for. Both by default (and for configurations
+/// from before roles existed).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Roles {
+    /// Shares its own USB devices.
+    pub server: bool,
+    /// Uses USB devices of other computers.
+    pub client: bool,
+}
+
+impl Default for Roles {
+    fn default() -> Self {
+        Roles { server: true, client: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -78,11 +78,41 @@ impl ServeOpts {
 #[cfg(windows)]
 #[derive(Subcommand)]
 enum ServiceCmd {
-    Install,
+    Install(InstallOpts),
     Uninstall,
     /// Entry point for the Windows service manager.
     #[command(hide = true)]
     Run,
+}
+
+/// Settings the installer passes to `service install`; omitted web options
+/// keep their current values.
+#[cfg(windows)]
+#[derive(clap::Args, Default)]
+pub struct InstallOpts {
+    /// Do not set up sharing this computer's devices.
+    #[arg(long)]
+    no_server: bool,
+    /// Do not set up using other computers' devices.
+    #[arg(long)]
+    no_client: bool,
+    #[arg(long, value_enum)]
+    web: Option<WebAccessArg>,
+    #[arg(long)]
+    web_port: Option<u16>,
+    /// File holding the new web password (read, then left to the caller to delete).
+    #[arg(long, value_name = "FILE")]
+    web_password_file: Option<PathBuf>,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum WebAccessArg {
+    Off,
+    /// Only from this computer.
+    Local,
+    /// From the whole network.
+    Network,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -102,6 +132,14 @@ enum WebCmd {
     Disable,
     Password,
     Status,
+    /// Exit status 0 if the web interface could use this port, 1 if not.
+    #[command(hide = true)]
+    CheckPort {
+        port: u16,
+    },
+    /// Exit status 0 if a web password is set (for the installer).
+    #[command(hide = true)]
+    HasPassword,
 }
 
 #[derive(Subcommand)]
@@ -303,7 +341,7 @@ async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Daemon(opts) | Cmd::Serve(opts) => run_daemon(ctx, opts, shutdown_signal()).await,
         Cmd::Web { action } => web(ctx, action).await,
         #[cfg(windows)]
-        Cmd::Service { action: ServiceCmd::Install } => winservice::install(),
+        Cmd::Service { action: ServiceCmd::Install(opts) } => winservice::install(ctx, opts).await,
         #[cfg(windows)]
         Cmd::Service { action: ServiceCmd::Uninstall } => winservice::uninstall(),
         #[cfg(windows)]
@@ -426,7 +464,16 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
     use usbnexus_core::daemon::{Daemon, DaemonOptions};
     use usbnexus_core::server::ServerEvent;
 
-    let (host, import) = backends(&opts)?;
+    let (mut host, mut import) = backends(&opts)?;
+    // A computer set up for one role only does not touch the other's
+    // drivers (e.g. no hub queries and no VBoxUSB on a client).
+    let roles = usbnexus_core::daemon::saved_roles(&ctx.dir);
+    if !roles.server {
+        host = Arc::new(usbnexus_core::backend::NoHost);
+    }
+    if !roles.client {
+        import = Arc::new(usbnexus_core::backend::UnsupportedImport);
+    }
     let label = |u: &usbnexus_core::server::DeviceUse| u.device_name.clone().unwrap_or_else(|| u.device.clone());
     let events = Arc::new(move |ev: ServerEvent| match ev {
         ServerEvent::Paired { name, .. } => println!("{}", t!("serve-paired", name = name)),
@@ -773,6 +820,25 @@ fn print_web_status(s: &usbnexus_core::api::WebStatusView) {
     }
 }
 
+/// Whether the web interface could listen on `port`: free on both
+/// loopback and all interfaces, or already ours.
+fn check_port(ctx: &Ctx, port: u16) -> Result<()> {
+    use std::net::{Ipv4Addr, TcpListener};
+    // The service itself listens on DEFAULT_PORT.
+    if port == 0 || port == DEFAULT_PORT {
+        bail!("port {port} is reserved");
+    }
+    let free = |ip: Ipv4Addr| TcpListener::bind((ip, port)).is_ok();
+    if free(Ipv4Addr::LOCALHOST) && free(Ipv4Addr::UNSPECIFIED) {
+        return Ok(());
+    }
+    let web = usbnexus_core::daemon::saved_web(&ctx.dir);
+    if web.enabled && web.port() == port {
+        return Ok(()); // our own web interface
+    }
+    bail!("port {port} is in use")
+}
+
 async fn web(ctx: &Ctx, action: WebCmd) -> Result<()> {
     use usbnexus_core::api::{self, Request, WebStatusView};
     let call = |req: Request| {
@@ -780,6 +846,13 @@ async fn web(ctx: &Ctx, action: WebCmd) -> Result<()> {
         async move { api::call::<WebStatusView>(&socket, &req).await }
     };
     let status = match action {
+        WebCmd::CheckPort { port } => return check_port(ctx, port),
+        WebCmd::HasPassword => {
+            if usbnexus_core::daemon::saved_web(&ctx.dir).password_hash.is_some() {
+                return Ok(());
+            }
+            bail!("no web password is set");
+        }
         WebCmd::Status => call(Request::WebStatus).await?,
         WebCmd::Disable => {
             call(Request::WebConfigure { enabled: Some(false), lan: None, port: None, password: None }).await?

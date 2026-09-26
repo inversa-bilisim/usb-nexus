@@ -13,7 +13,7 @@
 //! unplugged stays shared and is offered again when it comes back.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ use tracing::{debug, warn};
 use crate::access::{DeviceAccess, Policy};
 use crate::api::{
     ApiError, AttachState, AttachmentView, DiscoveredView, LocalDeviceView, PairingView, PeersView, RemoteDeviceView,
-    Request, Response, StatusView, UsageView, WebStatusView,
+    Request, Response, Roles, StatusView, UsageView, WebStatusView,
 };
 use crate::backend::{DeviceHost, ImportBackend, SharedDevice, SharedExport};
 use crate::client::{self, AttachEvent, ClientConfig, Target};
@@ -75,6 +75,9 @@ struct Config {
     web: WebSettings,
     #[serde(default = "default_retention")]
     usage_retention_days: u32,
+    /// Set by the installer; `None` (older versions): both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roles: Option<Roles>,
 }
 
 impl Default for Config {
@@ -85,6 +88,7 @@ impl Default for Config {
             attachments: vec![],
             web: WebSettings::default(),
             usage_retention_days: DEFAULT_RETENTION_DAYS,
+            roles: None,
         }
     }
 }
@@ -182,6 +186,74 @@ fn refers_to(saved: &str, id: &str, busid: Option<&str>) -> bool {
     saved == id || (DeviceId::parse(saved).is_legacy() && Some(saved) == busid)
 }
 
+fn read_config(path: &Path) -> Result<Config> {
+    match std::fs::read(path) {
+        Ok(data) => serde_json::from_slice(&data).with_context(|| format!("parsing {}", path.display())),
+        Err(_) => Ok(Config::default()),
+    }
+}
+
+fn write_config(path: &Path, config: &Config) -> Result<()> {
+    let data = serde_json::to_vec_pretty(config)?;
+    let tmp = path.with_extension("tmp");
+    // Holds the web password hash: owner-only.
+    crate::identity::write_private(&tmp, &data)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Settings an installer applies while the service is stopped; `None`
+/// fields keep their current value.
+#[derive(Debug, Default)]
+pub struct Setup {
+    pub roles: Option<Roles>,
+    /// Turns the web interface on or off.
+    pub web_enabled: Option<bool>,
+    pub web_lan: Option<bool>,
+    pub web_port: Option<u16>,
+    /// New web password (at least 8 characters).
+    pub web_password: Option<String>,
+}
+
+/// Roles saved in `state_dir`; both if none were chosen.
+pub fn saved_roles(state_dir: &Path) -> Roles {
+    read_config(&state_dir.join("config.json")).ok().and_then(|c| c.roles).unwrap_or_default()
+}
+
+/// Web settings saved in `state_dir`.
+pub fn saved_web(state_dir: &Path) -> WebSettings {
+    read_config(&state_dir.join("config.json")).map(|c| c.web).unwrap_or_default()
+}
+
+/// Writes `setup` into the configuration in `state_dir`, for the next
+/// start of the service. Enabling the web interface needs a password,
+/// given now or set before.
+pub fn apply_setup(state_dir: &Path, setup: Setup) -> Result<()> {
+    std::fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
+    let path = state_dir.join("config.json");
+    let mut config = read_config(&path)?;
+    if let Some(roles) = setup.roles {
+        config.roles = Some(roles);
+    }
+    let web = &mut config.web;
+    if let Some(password) = setup.web_password {
+        web.password_hash = Some(web::hash_password(&password)?);
+    }
+    if let Some(lan) = setup.web_lan {
+        web.lan = lan;
+    }
+    if let Some(port) = setup.web_port {
+        web.port = Some(port);
+    }
+    if let Some(enabled) = setup.web_enabled {
+        if enabled && web.password_hash.is_none() {
+            return Err(ApiError::new("password_required", "set a web password first").into());
+        }
+        web.enabled = enabled;
+    }
+    write_config(&path, &config)
+}
+
 impl Daemon {
     /// Loads state, starts the server and restores saved attachments.
     pub async fn start(opts: DaemonOptions) -> Result<Daemon> {
@@ -190,10 +262,7 @@ impl Daemon {
         let clients = TrustStore::load(&opts.state_dir.join("trusted-clients.json"))?;
         let servers = TrustStore::load(&opts.state_dir.join("trusted-servers.json"))?;
         let config_path = opts.state_dir.join("config.json");
-        let config: Config = match std::fs::read(&config_path) {
-            Ok(data) => serde_json::from_slice(&data).with_context(|| format!("parsing {}", config_path.display()))?,
-            Err(_) => Config::default(),
-        };
+        let config = read_config(&config_path)?;
         let usage = Arc::new(UsageLog::open(&opts.state_dir.join("usage.log"), config.usage_retention_days));
 
         let export =
@@ -309,12 +378,7 @@ impl Daemon {
         // The lock is held until the file is replaced, so saves from the
         // device poller and API requests do not interleave.
         let config = self.inner.config.lock().unwrap();
-        let data = serde_json::to_vec_pretty(&*config)?;
-        let tmp = self.inner.config_path.with_extension("tmp");
-        // Holds the web password hash: owner-only.
-        crate::identity::write_private(&tmp, &data)?;
-        std::fs::rename(&tmp, &self.inner.config_path)?;
-        Ok(())
+        write_config(&self.inner.config_path, &config)
     }
 
     /// Saves the shared devices after a change and ends sessions the new
@@ -612,6 +676,7 @@ impl Daemon {
         Ok(match req {
             Request::Status => ok(StatusView {
                 name: inner.name.clone(),
+                roles: inner.config.lock().unwrap().roles.unwrap_or_default(),
                 fingerprint: inner.fingerprint.clone(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 listen: inner.listen.clone(),
@@ -828,5 +893,49 @@ impl Daemon {
                 ok(self.web_status().await)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installer_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(saved_roles(dir.path()), Roles { server: true, client: true }, "both by default");
+
+        // Other settings survive.
+        let config = Config { usage_retention_days: 30, ..Config::default() };
+        write_config(&path, &config).unwrap();
+
+        let client_only = Roles { server: false, client: true };
+        apply_setup(dir.path(), Setup { roles: Some(client_only), ..Setup::default() }).unwrap();
+        assert_eq!(saved_roles(dir.path()), client_only);
+        assert_eq!(read_config(&path).unwrap().usage_retention_days, 30);
+
+        // The web interface needs a password.
+        let enable = || Setup { web_enabled: Some(true), web_lan: Some(false), ..Setup::default() };
+        let e = apply_setup(dir.path(), enable()).unwrap_err();
+        assert_eq!(ApiError::from_anyhow(&e).code, "password_required");
+        let short = Setup { web_password: Some("short".into()), ..enable() };
+        assert_eq!(ApiError::from_anyhow(&apply_setup(dir.path(), short).unwrap_err()).code, "weak_password");
+        let first = Setup { web_password: Some("correct horse".into()), web_port: Some(4000), ..enable() };
+        apply_setup(dir.path(), first).unwrap();
+        let web = saved_web(dir.path());
+        assert!(web.enabled && !web.lan);
+        assert_eq!(web.port(), 4000);
+        let hash = web.password_hash.clone().unwrap();
+
+        // An upgrade without a new password keeps the old one.
+        apply_setup(dir.path(), Setup { web_lan: Some(true), ..enable() }).unwrap();
+        let web = saved_web(dir.path());
+        assert!(web.enabled && web.lan);
+        assert_eq!(web.password_hash, Some(hash));
+
+        apply_setup(dir.path(), Setup { web_enabled: Some(false), ..Setup::default() }).unwrap();
+        assert!(!saved_web(dir.path()).enabled);
+        assert_eq!(saved_roles(dir.path()), client_only, "roles untouched");
     }
 }

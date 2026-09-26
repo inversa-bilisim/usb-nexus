@@ -432,6 +432,24 @@ impl DeviceHost for UnsupportedHost {
     }
 }
 
+/// Host for a computer not set up to share its devices: lists none and
+/// never touches USB devices.
+pub struct NoHost;
+
+impl DeviceHost for NoHost {
+    fn list_all(&self) -> Result<Vec<LocalDevice>> {
+        Ok(vec![])
+    }
+
+    fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
+        Box::pin(async move { Err(not_shared(busid)) })
+    }
+
+    fn release(&self, _busid: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// Placeholder for platforms that cannot attach remote devices (macOS has
 /// no virtual USB host controller available to third parties).
 pub struct UnsupportedImport;

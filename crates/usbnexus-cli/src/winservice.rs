@@ -22,7 +22,7 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
-use crate::{Ctx, ServeOpts};
+use crate::{Ctx, InstallOpts, ServeOpts, WebAccessArg};
 
 pub const SERVICE_NAME: &str = "usbnexus";
 const DISPLAY_NAME: &str = "USB Nexus";
@@ -108,7 +108,28 @@ fn start_monitor() {
     }
 }
 
-pub fn install() -> Result<()> {
+/// Installs (or updates) and starts the service with the roles and web
+/// settings in `opts`; returns once the service answers.
+pub async fn install(ctx: &Ctx, opts: InstallOpts) -> Result<()> {
+    use usbnexus_core::api::Roles;
+    use usbnexus_core::daemon::{apply_setup, Setup};
+
+    let roles = Roles { server: !opts.no_server, client: !opts.no_client };
+    let web_password = match &opts.web_password_file {
+        Some(path) => Some(read_password_file(path)?),
+        None => None,
+    };
+    let setup = Setup {
+        roles: Some(roles),
+        web_enabled: opts.web.map(|w| !matches!(w, WebAccessArg::Off)),
+        web_lan: match opts.web {
+            Some(WebAccessArg::Network) => Some(true),
+            Some(WebAccessArg::Local) => Some(false),
+            _ => None,
+        },
+        web_port: opts.web_port,
+        web_password,
+    };
     let exe = std::env::current_exe()?;
     let manager = ServiceManager::local_computer(
         None::<&str>,
@@ -127,17 +148,24 @@ pub fn install() -> Result<()> {
         account_name: None, // LocalSystem
         account_password: None,
     };
-    install_drivers(&manager)?;
-    // Installing over an earlier version updates the existing service.
+    // Installing over an earlier version updates the existing service; it
+    // is stopped first, as it rewrites the configuration while running.
     let access =
         ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS;
-    let service = match manager.open_service(SERVICE_NAME, access) {
-        Ok(service) => {
-            stop_and_wait(&service)?;
+    let existing = manager.open_service(SERVICE_NAME, access).ok();
+    if let Some(service) = &existing {
+        stop_and_wait(service)?;
+    }
+    apply_setup(&ctx.dir, setup)?;
+    if roles.server {
+        install_drivers(&manager)?;
+    }
+    let service = match existing {
+        Some(service) => {
             service.change_config(&info).context("updating the service")?;
             service
         }
-        Err(_) => manager.create_service(&info, access).context("creating the service")?,
+        None => manager.create_service(&info, access).context("creating the service")?,
     };
     service.set_description(DESCRIPTION)?;
     // Restart after a crash or an error exit: 5 s, 10 s, then every 30 s;
@@ -169,8 +197,36 @@ pub fn install() -> Result<()> {
         .output();
 
     service.start(&[] as &[&OsStr]).context("starting the service")?;
+    wait_until_answering(ctx).await;
     println!("{}", t!("service-installed"));
     Ok(())
+}
+
+/// Reads a password file: UTF-8, or UTF-16LE with a byte order mark (as
+/// the installer writes it); a trailing line break is ignored.
+fn read_password_file(path: &std::path::Path) -> Result<String> {
+    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let text = match data.strip_prefix(&[0xFF, 0xFE]) {
+        Some(utf16) => {
+            let units: Vec<u16> = utf16.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            String::from_utf16(&units).context("password file is not valid UTF-16")?
+        }
+        None => String::from_utf8(data).context("password file is not valid UTF-8")?,
+    };
+    Ok(text.trim_start_matches('\u{feff}').trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// Waits (up to 30 s) until the started service answers on its pipe, so
+/// whatever runs next (the app, the installer's browser) finds it ready.
+async fn wait_until_answering(ctx: &Ctx) {
+    use usbnexus_core::api::{self, Request, StatusView};
+    for _ in 0..60 {
+        if api::call::<StatusView>(&ctx.socket, &Request::Status).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    tracing::warn!("the service did not answer within 30 s");
 }
 
 /// Stops a running service and waits (up to 5 s) until it has stopped.
@@ -246,7 +302,9 @@ fn run_service() -> Result<()> {
     })?;
     handle.set_service_status(status(ServiceState::StartPending, 0))?;
 
-    start_monitor();
+    if usbnexus_core::daemon::saved_roles(&ctx.dir).server {
+        start_monitor();
+    }
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(async {
         let mut stop_rx = stop_rx;

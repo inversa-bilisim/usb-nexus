@@ -89,14 +89,13 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
 ## Agreed next features (owner, 2026-09-26; not implemented yet)
 
 ### Language follows the operating system
-- Installer: no language selector (`displayLanguageSelector: false`); NSIS
-  picks the Windows UI language if the installer has it, else English (put
-  English first). Installer-only texts in `hooks.nsh` must come from one
-  place per language so adding a language is not forgotten there.
-- App, service and CLI: `usbnexus_i18n::detect` must read the Windows UI
-  language (and the macOS preferred languages), not only `LANG`; region
-  variants map to the base language (`fr-FR` → `fr`); unknown → English.
-  A language picked in the app's language box still wins.
+- Done: installer has no language selector (`displayLanguageSelector:
+  false`, English first = fallback); `usbnexus_i18n::detect` falls back to
+  the OS preferred UI languages (`sys-locale`) after the `LANG`-style
+  variables; the app's language box still wins.
+- Todo (with the installer rework below): installer-only texts in
+  `hooks.nsh` must come from one place per language so adding a language is
+  not forgotten there.
 - More languages (e.g. French) will be added later: new `locales/xx.ftl`,
   `LOCALES`, and the NSIS `languages` list.
 

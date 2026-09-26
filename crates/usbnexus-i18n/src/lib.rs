@@ -52,7 +52,8 @@ pub fn match_locale(spec: &str) -> Option<&'static str> {
 }
 
 /// Picks a language: explicit choice, then `LC_ALL`, `LC_MESSAGES`, `LANG`,
-/// `LANGUAGE`, then the fallback.
+/// `LANGUAGE`, then the operating system's preferred UI languages (on
+/// Windows and macOS these variables are usually unset), then the fallback.
 pub fn detect(explicit: Option<&str>) -> &'static str {
     if let Some(code) = explicit.and_then(match_locale) {
         return code;
@@ -65,7 +66,9 @@ pub fn detect(explicit: Option<&str>) -> &'static str {
             }
         }
     }
-    FALLBACK
+    // In order of preference, e.g. ["fr-FR", "tr-TR", "en-US"]: the first
+    // one we have wins.
+    sys_locale::get_locales().find_map(|l| match_locale(&l)).unwrap_or(FALLBACK)
 }
 
 impl Localizer {

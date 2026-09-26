@@ -14,7 +14,7 @@
           "English",
           "Turkish"
         ],
-        "displayLanguageSelector": true,
+        "displayLanguageSelector": false,
         "installerHooks": "../../../packaging/windows/hooks.nsh"
       }
     },

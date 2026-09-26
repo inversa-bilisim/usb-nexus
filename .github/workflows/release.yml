@@ -53,6 +53,11 @@ jobs:
           cargo build --release -p usbnexus-cli
           New-Item -ItemType Directory -Force apps\desktop\src-tauri\binaries | Out-Null
           Copy-Item target\release\usbnexus.exe apps\desktop\src-tauri\binaries\usbnexus-x86_64-pc-windows-msvc.exe
+      - name: Bundled usbip-win2 installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: packaging/windows/fetch-usbip-win2.ps1
       - name: Installer
         working-directory: apps/desktop/src-tauri
         run: cargo tauri build --config ../../../packaging/windows/tauri.bundle.json

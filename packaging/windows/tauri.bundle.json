@@ -19,7 +19,8 @@
       }
     },
     "resources": {
-      "../../../packaging/windows/drivers/": "drivers/"
+      "../../../packaging/windows/drivers/": "drivers/",
+      "../../../packaging/windows/usbip-win2/": "usbip-win2/"
     }
   }
 }

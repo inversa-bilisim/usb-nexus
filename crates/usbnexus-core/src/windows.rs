@@ -90,6 +90,10 @@ impl WindowsImport {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 accept.abort();
+                // usbip-win2 before 0.9.7.6 rejects `--once`.
+                if format!("{e:#}").contains("--once") {
+                    return Err(ApiError::new("driver_outdated", format!("usbip-win2 is too old: {e:#}")).into());
+                }
                 return Err(e);
             }
             Err(_) => {

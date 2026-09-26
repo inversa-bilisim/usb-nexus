@@ -31,6 +31,10 @@ installers. The GitHub repository is `inversa-bilisim/usb-nexus` (moved from
 | `packaging/{linux,windows,macos}` | systemd/sysusers + deb/rpm scripts; NSIS hooks + VBoxUSB drivers; launchd + pkg |
 | `.github/workflows` | `ci.yml` (fmt, clippy -D warnings, tests on Linux/Windows/macOS), `release.yml` (packages on `v*` tags) |
 
+Windows client needs usbip-win2 ≥ 0.9.7.6 (`attach --once`); its installer is
+downloaded by `packaging/windows/fetch-usbip-win2.ps1` (release CI) and offered
+by `hooks.nsh` when missing or too old.
+
 Backends: Linux `usbip-host`/`vhci-hcd` via sysfs; Windows client via
 usbip-win2 (`windows.rs` + `bridge.rs`), Windows server via VBoxUSB
 (`windows_host.rs`); macOS server via libusb (`libusb_host.rs`, also

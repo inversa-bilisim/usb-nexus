@@ -674,16 +674,27 @@ impl Daemon {
     async fn dispatch(&self, req: Request) -> Result<Response> {
         let inner = &self.inner;
         Ok(match req {
-            Request::Status => ok(StatusView {
-                name: inner.name.clone(),
-                roles: inner.config.lock().unwrap().roles.unwrap_or_default(),
-                fingerprint: inner.fingerprint.clone(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                listen: inner.listen.clone(),
-                pairing: inner.server.pairing().map(|(pin, left)| PairingView { pin, remaining_secs: left.as_secs() }),
-                policy: inner.export.policy(),
-                policy_chosen: inner.config.lock().unwrap().policy.is_some(),
-            }),
+            Request::Status => {
+                // One lock: a guard taken inside the struct expression lives
+                // until its end, so locking twice there would deadlock.
+                let (roles, policy_chosen) = {
+                    let config = inner.config.lock().unwrap();
+                    (config.roles.unwrap_or_default(), config.policy.is_some())
+                };
+                ok(StatusView {
+                    name: inner.name.clone(),
+                    roles,
+                    fingerprint: inner.fingerprint.clone(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    listen: inner.listen.clone(),
+                    pairing: inner
+                        .server
+                        .pairing()
+                        .map(|(pin, left)| PairingView { pin, remaining_secs: left.as_secs() }),
+                    policy: inner.export.policy(),
+                    policy_chosen,
+                })
+            }
             Request::LocalDevices => ok(self.local_devices()?),
             Request::SetShared { device, shared } => {
                 if inner.export.set_shared(&device, shared)? {

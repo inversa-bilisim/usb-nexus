@@ -20,7 +20,7 @@ $token = if ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }
 if ($token) { $headers['Authorization'] = "Bearer $token" }
 
 $release = Invoke-RestMethod -Headers $headers "https://api.github.com/repos/vadimgrn/usbip-win2/releases/tags/v.$Version"
-$assets = @($release.assets | Where-Object { $_.name -match "-$Arch-release\.exe$" })
+$assets = @($release.assets | Where-Object { $_.name -eq "USBip-$Version-$Arch.exe" })
 if ($assets.Count -ne 1) {
     throw "expected one $Arch installer in usbip-win2 $Version, found: $($release.assets.name -join ', ')"
 }

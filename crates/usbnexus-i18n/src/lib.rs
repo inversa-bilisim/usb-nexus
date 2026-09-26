@@ -273,7 +273,8 @@ mod tests {
         if std::env::var_os("UPDATE_NSIS_STRINGS").is_some() {
             std::fs::write(&path, &want).unwrap();
         }
-        let have = std::fs::read_to_string(&path).unwrap_or_default();
+        // Windows checkouts may turn line endings into CRLF.
+        let have = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
         assert!(
             have == want,
             "{} is out of date; run: UPDATE_NSIS_STRINGS=1 cargo test -p usbnexus-i18n",

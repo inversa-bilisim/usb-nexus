@@ -498,7 +498,10 @@ impl Daemon {
     async fn restart_web(&self) {
         let settings = self.inner.config.lock().unwrap().web.clone();
         let mut slot = self.inner.web.lock().await;
-        *slot = Ok(None); // stop the old one (and drop its sessions) first
+        // Stop the old one (and drop its sessions) first.
+        if let Ok(Some(old)) = std::mem::replace(&mut *slot, Ok(None)) {
+            old.stop().await;
+        }
         if !settings.enabled {
             return;
         }

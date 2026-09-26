@@ -159,14 +159,27 @@ struct Peer(SocketAddr);
 
 /// A running web interface; stops when dropped.
 pub struct WebServer {
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
     pub addr: SocketAddr,
     pub fingerprint: String,
 }
 
+impl WebServer {
+    /// Stops the server and waits until its listening socket is closed, so
+    /// the port can be bound again right away.
+    pub async fn stop(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
 impl Drop for WebServer {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -202,7 +215,7 @@ pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSett
             });
         }
     });
-    Ok(WebServer { task, addr, fingerprint: fingerprint(&id.cert_der) })
+    Ok(WebServer { task: Some(task), addr, fingerprint: fingerprint(&id.cert_der) })
 }
 
 fn router(state: Arc<WebState>) -> Router {

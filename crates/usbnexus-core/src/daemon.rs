@@ -270,7 +270,10 @@ impl Daemon {
                 web: tokio::sync::Mutex::new(Ok(None)),
             }),
         };
-        daemon.poll_devices();
+        {
+            let d = daemon.clone();
+            tokio::task::spawn_blocking(move || d.poll_devices()).await?;
+        }
         *daemon.inner.poller.lock().unwrap() = Some(daemon.spawn_poller());
         for a in saved {
             daemon.spawn_attachment(&a.server, &a.device);

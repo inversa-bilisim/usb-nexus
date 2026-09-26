@@ -474,6 +474,44 @@ fn pnp_devices(class: &GUID) -> Result<Vec<(String, PnpDevice)>> {
     Ok(out)
 }
 
+/// Service of usbip-win2's virtual host controller (`ROOT\USBIP_WIN2\UDE`).
+const USBIP_WIN2_SERVICE: &str = "usbip2_ude";
+
+/// Whether `devnode` hangs off usbip-win2's virtual host controller, i.e.
+/// is a device of another computer attached through USB Nexus. Such devices
+/// are not listed: sharing them makes no sense, and asking their hub for
+/// descriptors sends requests through this very service, which can wait
+/// on itself.
+fn is_remote_device(devnode: u32) -> bool {
+    let mut node = devnode;
+    // Device -> (hubs) -> root hub -> host controller; a few levels suffice.
+    for _ in 0..8 {
+        let mut parent = 0u32;
+        // SAFETY: plain out-parameter.
+        if unsafe { di::CM_Get_Parent(&mut parent, node, 0) } != di::CR_SUCCESS {
+            return false;
+        }
+        node = parent;
+        let mut buf = [0u16; 128];
+        let mut len = (buf.len() * 2) as u32;
+        // SAFETY: buffer valid for `len` bytes.
+        let rc = unsafe {
+            di::CM_Get_DevNode_Registry_PropertyW(
+                node,
+                di::CM_DRP_SERVICE,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut len,
+                0,
+            )
+        };
+        if rc == di::CR_SUCCESS && from_wide(&buf).eq_ignore_ascii_case(USBIP_WIN2_SERVICE) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Device interface path of the hub a device is plugged into.
 fn hub_path(devnode: u32) -> Result<String> {
     let mut parent = 0u32;
@@ -623,7 +661,7 @@ fn find(busid: &str) -> Result<PnpDevice> {
     pnp_devices(&usb::GUID_DEVINTERFACE_USB_DEVICE)?
         .into_iter()
         .map(|(_, d)| d)
-        .find(|d| d.busid() == busid)
+        .find(|d| d.busid() == busid && !is_remote_device(d.devnode))
         .ok_or_else(|| ApiError::new("no_such_device", format!("no USB device {busid}")).into())
 }
 
@@ -966,7 +1004,7 @@ impl DeviceHost for WindowsHost {
         let mut seen = std::collections::BTreeSet::new();
         let mut out = vec![];
         for (_, dev) in pnp_devices(&usb::GUID_DEVINTERFACE_USB_DEVICE)? {
-            if !seen.insert(dev.busid()) {
+            if is_remote_device(dev.devnode) || !seen.insert(dev.busid()) {
                 continue;
             }
             match local_device(&dev) {

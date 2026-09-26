@@ -177,6 +177,12 @@ pub fn resolve(shared: &[SharedDevice], connected: &[LocalDevice]) -> Vec<Resolv
 pub struct SharedExport {
     host: Arc<dyn DeviceHost>,
     state: Mutex<ShareState>,
+    /// Devices seen by the last listing. Listing can block for a long time
+    /// (on Windows it asks every hub for descriptors), so only
+    /// [`SharedExport::refresh`], which the service runs on a blocking
+    /// thread, lists devices; everything else, often called from async
+    /// code, uses this copy.
+    connected: Mutex<Option<Vec<LocalDevice>>>,
 }
 
 struct ShareState {
@@ -193,7 +199,21 @@ fn not_shared(what: &str) -> anyhow::Error {
 impl SharedExport {
     pub fn new(host: Arc<dyn DeviceHost>, shared: impl IntoIterator<Item = SharedDevice>, policy: Policy) -> Self {
         let state = ShareState { shared: shared.into_iter().collect(), policy, ports: HashMap::new() };
-        SharedExport { host, state: Mutex::new(state) }
+        SharedExport { host, state: Mutex::new(state), connected: Mutex::new(None) }
+    }
+
+    /// Devices of the last listing; lists them now if there was none yet.
+    fn connected(&self) -> Result<Vec<LocalDevice>> {
+        if let Some(list) = &*self.connected.lock().unwrap() {
+            return Ok(list.clone());
+        }
+        self.list_now()
+    }
+
+    fn list_now(&self) -> Result<Vec<LocalDevice>> {
+        let list = self.host.list_all()?;
+        *self.connected.lock().unwrap() = Some(list.clone());
+        Ok(list)
     }
 
     pub fn host(&self) -> &Arc<dyn DeviceHost> {
@@ -215,7 +235,7 @@ impl SharedExport {
 
     /// Every connected device, and the shared devices matched against them.
     pub fn snapshot(&self) -> Result<(Vec<LocalDevice>, Vec<Resolved>)> {
-        let connected = self.host.list_all()?;
+        let connected = self.connected()?;
         let resolved = resolve(&self.shared(), &connected);
         Ok((connected, resolved))
     }
@@ -226,7 +246,7 @@ impl SharedExport {
     /// keep reserving them. Returns whether anything changed (and should be
     /// saved).
     pub fn refresh(&self) -> Result<bool> {
-        let connected = self.host.list_all()?;
+        let connected = self.list_now()?;
         let mut st = self.state.lock().unwrap();
         let resolved = resolve(&st.shared, &connected);
         let mut changed = false;
@@ -285,7 +305,7 @@ impl SharedExport {
     /// no longer shared is handed back to its normal driver.
     pub fn set_shared(&self, device: &str, shared: bool) -> Result<bool> {
         let wanted = DeviceId::parse(device);
-        let connected = self.host.list_all()?;
+        let connected = self.connected()?;
         let mut st = self.state.lock().unwrap();
         let index = Self::find(&st.shared, &connected, &wanted);
         if shared {
@@ -322,7 +342,7 @@ impl SharedExport {
     /// Changes who may use a shared device.
     pub fn set_access(&self, device: &str, access: DeviceAccess) -> Result<()> {
         let wanted = DeviceId::parse(device);
-        let connected = if wanted.is_legacy() { self.host.list_all()? } else { vec![] };
+        let connected = if wanted.is_legacy() { self.connected()? } else { vec![] };
         let mut st = self.state.lock().unwrap();
         let i = Self::find(&st.shared, &connected, &wanted).ok_or_else(|| not_shared(device))?;
         st.shared[i].access = access;
@@ -332,7 +352,7 @@ impl SharedExport {
     /// Lets the computer `fingerprint` use exactly the devices in `devices`
     /// (among those whose access is limited to a list).
     pub fn set_client_devices(&self, fingerprint: &str, devices: &[String]) -> Result<()> {
-        let connected = self.host.list_all()?;
+        let connected = self.connected()?;
         let mut st = self.state.lock().unwrap();
         let mut chosen = BTreeSet::new();
         for d in devices {
@@ -525,6 +545,43 @@ mod tests {
         assert!(export.refresh().unwrap());
         assert_eq!(export.shared()[0].id.to_string(), STICK);
         assert!(!export.refresh().unwrap(), "nothing left to migrate");
+    }
+
+    /// Counts how often devices are listed.
+    #[derive(Default)]
+    struct CountingHost(std::sync::atomic::AtomicUsize);
+
+    impl DeviceHost for CountingHost {
+        fn list_all(&self) -> Result<Vec<LocalDevice>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            DemoHost.list_all()
+        }
+        fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
+            Box::pin(async move { anyhow::bail!("not exporting {busid}") })
+        }
+        fn release(&self, _busid: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Listing can block (Windows asks every hub, including the virtual one
+    /// whose answers travel through this very service), so only `refresh`
+    /// lists devices; requests use the last listing.
+    #[test]
+    fn only_refresh_lists_devices() {
+        let host = Arc::new(CountingHost::default());
+        let export = SharedExport::new(host.clone(), [], Policy::Open);
+        let listings = || host.0.load(std::sync::atomic::Ordering::SeqCst);
+        export.refresh().unwrap();
+        assert_eq!(listings(), 1);
+        assert!(export.set_shared("1-1", true).unwrap());
+        export.set_access(STICK, DeviceAccess::default()).unwrap();
+        export.set_client_devices("fp", &[STICK.to_string()]).unwrap();
+        export.snapshot().unwrap();
+        export.list().unwrap();
+        assert_eq!(listings(), 1, "requests reuse the last listing");
+        export.refresh().unwrap();
+        assert_eq!(listings(), 2);
     }
 
     #[test]

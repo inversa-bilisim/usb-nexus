@@ -112,6 +112,14 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
     while still on the page, before installing; our own running service
     holding it counts as free), "only this computer" (default) or "the whole
     network".
+- Role page is plain (labels only, no descriptions). "Next" is disabled
+  (no message) unless server or client is ticked.
+- Web page: access radio ("only this computer" default / "whole network"),
+  port with live check message, password + repeat (min 8; "Next" disabled
+  until valid). On upgrade with a password already set, empty fields keep
+  it. Password only, no user name (single administrator).
+- If web access was set up, the finish opens https://localhost:<port> in
+  the default browser.
 - The service is always installed.
 - Upgrades remember the previous choices (registry) and preselect them.
 - Silent install (`/S`): server + client, web off.

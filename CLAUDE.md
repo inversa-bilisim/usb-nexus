@@ -86,6 +86,40 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   capped at 10 MB. Repeated refusals of one device to one computer are
   logged once per hour.
 
+## Agreed next features (owner, 2026-09-26; not implemented yet)
+
+### Language follows the operating system
+- Installer: no language selector (`displayLanguageSelector: false`); NSIS
+  picks the Windows UI language if the installer has it, else English (put
+  English first). Installer-only texts in `hooks.nsh` must come from one
+  place per language so adding a language is not forgotten there.
+- App, service and CLI: `usbnexus_i18n::detect` must read the Windows UI
+  language (and the macOS preferred languages), not only `LANG`; region
+  variants map to the base language (`fr-FR` → `fr`); unknown → English.
+  A language picked in the app's language box still wins.
+- More languages (e.g. French) will be added later: new `locales/xx.ftl`,
+  `LOCALES`, and the NSIS `languages` list.
+
+### Role selection in the Windows installer
+- Custom page after the install directory (needs a custom Tauri NSIS
+  template), all ticked by default:
+  - "Use as server": installs VBoxUSB drivers (no extra explanation text).
+  - "Use as client": installs the bundled usbip-win2 (replaces today's
+    message box). While ticked, a note below says usbip-win2 will be
+    installed (USB devices pause briefly, restart needed), or that it is
+    already installed; the note disappears when unticked.
+  - "Web access": if ticked, the next page configures it: password + repeat
+    (min 8, required), port (default 3242, editable, checked for being free
+    while still on the page, before installing; our own running service
+    holding it counts as free), "only this computer" (default) or "the whole
+    network".
+- The service is always installed.
+- Upgrades remember the previous choices (registry) and preselect them.
+- Silent install (`/S`): server + client, web off.
+- In the app: screens of a role that is not installed are hidden
+  completely; Settings has a place to set up the missing role later
+  (server → drivers, client → usbip-win2) and the reverse.
+
 ## Pending end-to-end tests (to run with real hardware)
 
 1. Linux ↔ Linux with a real USB stick.

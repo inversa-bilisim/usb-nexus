@@ -94,6 +94,12 @@ FunctionEnd
   ; can be replaced. `service install` below updates and restarts it.
   nsExec::ExecToLog 'sc.exe stop usbnexus'
   Sleep 3000
+  ; The service loads the VBoxUSBMon kernel driver straight from
+  ; $INSTDIR\drivers, which keeps VBoxUSBMon.sys locked. With our service
+  ; stopped nobody holds it open, so it can be unloaded (this fails
+  ; harmlessly while another program such as usbipd-win still uses it).
+  nsExec::ExecToLog 'sc.exe stop VBoxUSBMon'
+  Sleep 2000
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

@@ -266,6 +266,14 @@ fn main() -> ExitCode {
                 .with_writer(std::sync::Mutex::new(file))
                 .init();
         }
+        // A panic would otherwise go to a console nobody sees and could leave
+        // a half-working service behind (e.g. a dead local API task). Log it
+        // and exit so the service manager restarts the service.
+        std::panic::set_hook(Box::new(|info| {
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            tracing::error!("panic: {info}\n{backtrace}");
+            std::process::exit(1);
+        }));
         return match winservice::run(ctx) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

@@ -14,8 +14,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use usbnexus_i18n::t;
 use windows_service::service::{
-    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo,
-    ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceErrorControl,
+    ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState,
+    ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -127,10 +128,30 @@ pub fn install() -> Result<()> {
         account_password: None,
     };
     install_drivers(&manager)?;
-    let service = manager
-        .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
-        .context("creating the service")?;
+    // Installing over an earlier version updates the existing service.
+    let access =
+        ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS;
+    let service = match manager.open_service(SERVICE_NAME, access) {
+        Ok(service) => {
+            stop_and_wait(&service)?;
+            service.change_config(&info).context("updating the service")?;
+            service
+        }
+        Err(_) => manager.create_service(&info, access).context("creating the service")?,
+    };
     service.set_description(DESCRIPTION)?;
+    // Restart after a crash or an error exit: 5 s, 10 s, then every 30 s;
+    // the count resets after a day without failures.
+    let restart = |secs| ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(secs) };
+    service
+        .update_failure_actions(ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
+            reboot_msg: None,
+            command: None,
+            actions: Some(vec![restart(5), restart(10), restart(30)]),
+        })
+        .context("setting the service recovery actions")?;
+    service.set_failure_actions_on_non_crash_failures(true)?;
 
     // Best effort: without it only outgoing connections work.
     let program = format!("program={}", exe.display());
@@ -152,12 +173,8 @@ pub fn install() -> Result<()> {
     Ok(())
 }
 
-pub fn uninstall() -> Result<()> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .context("opening the service manager (run as administrator)")?;
-    let service = manager
-        .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE)
-        .context("opening the service")?;
+/// Stops a running service and waits (up to 5 s) until it has stopped.
+fn stop_and_wait(service: &windows_service::service::Service) -> Result<()> {
     if service.query_status()?.current_state != ServiceState::Stopped {
         let _ = service.stop();
         for _ in 0..50 {
@@ -167,6 +184,16 @@ pub fn uninstall() -> Result<()> {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+    Ok(())
+}
+
+pub fn uninstall() -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("opening the service manager (run as administrator)")?;
+    let service = manager
+        .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE)
+        .context("opening the service")?;
+    stop_and_wait(&service)?;
     service.delete().context("deleting the service")?;
     uninstall_drivers(&manager);
     let _ = std::process::Command::new("netsh")

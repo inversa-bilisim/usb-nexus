@@ -89,6 +89,13 @@ Function usbnexus_usbip_win2
   ${EndIf}
 FunctionEnd
 
+!macro NSIS_HOOK_PREINSTALL
+  ; An earlier version's service keeps usbnexus.exe open; stop it so the file
+  ; can be replaced. `service install` below updates and restarts it.
+  nsExec::ExecToLog 'sc.exe stop usbnexus'
+  Sleep 3000
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   ; Register and start the background service (runs as LocalSystem).
   nsExec::ExecToLog '"$INSTDIR\usbnexus.exe" service install'

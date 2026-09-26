@@ -96,6 +96,59 @@ fn uninstall_drivers(manager: &ServiceManager) {
     }
 }
 
+/// Sets up what `roles` need when they are chosen in the app: the VBoxUSB
+/// drivers for sharing, the bundled usbip-win2 for using remote devices.
+/// Returns whether Windows must be restarted. Runs inside the service
+/// (LocalSystem).
+pub fn prepare_roles(roles: usbnexus_core::api::Roles) -> Result<bool> {
+    if roles.server {
+        let manager = ServiceManager::local_computer(
+            None::<&str>,
+            ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+        )
+        .context("opening the service manager")?;
+        install_drivers(&manager)?;
+        start_monitor();
+    }
+    if roles.client && usbnexus_core::windows::WindowsImport::default().usbip_exe().is_err() {
+        return install_usbip_win2();
+    }
+    Ok(false)
+}
+
+/// Runs the usbip-win2 installer bundled next to the executable, silently;
+/// returns whether Windows must be restarted.
+fn install_usbip_win2() -> Result<bool> {
+    let setup = std::env::current_exe()?
+        .parent()
+        .context("no executable directory")?
+        .join("usbip-win2")
+        .join("usbip-win2-setup.exe");
+    if !setup.is_file() {
+        return Err(usbnexus_core::api::ApiError::new("driver_missing", "usbip-win2 setup is not bundled").into());
+    }
+    // Same options as the installer (packaging/windows/hooks.nsh).
+    let status = std::process::Command::new(&setup)
+        .args([
+            "/SILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NOCANCEL",
+            "/SP-",
+            "/NORESTART",
+            "/RESTARTEXITCODE=3010",
+            "/CLOSEAPPLICATIONS",
+            "/COMPONENTS=main,client",
+            "/TASKS=vcredist",
+        ])
+        .status()
+        .with_context(|| format!("running {}", setup.display()))?;
+    match status.code() {
+        Some(0) => Ok(false),
+        Some(3010) => Ok(true),
+        code => bail!("usbip-win2 setup failed (exit code {code:?})"),
+    }
+}
+
 /// Starts the capture monitor so devices can be shared (best effort).
 fn start_monitor() {
     let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else { return };

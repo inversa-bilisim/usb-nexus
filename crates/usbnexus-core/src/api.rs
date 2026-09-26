@@ -86,6 +86,12 @@ pub enum Request {
         fingerprint: String,
     },
     WebStatus,
+    /// Changes what this computer is set up for, installing what the new
+    /// roles need (drivers) first. At least one role must remain.
+    SetRoles {
+        server: bool,
+        client: bool,
+    },
     /// Changes the web interface settings; fields left out are unchanged.
     /// Refused when it arrives through the web interface itself.
     WebConfigure {
@@ -169,6 +175,9 @@ pub struct StatusView {
     /// What this computer is set up for; interfaces hide the other screens.
     #[serde(default)]
     pub roles: Roles,
+    /// Something installed for a role needs a restart of the computer.
+    #[serde(default)]
+    pub reboot_required: bool,
     pub fingerprint: String,
     pub version: String,
     pub listen: String,

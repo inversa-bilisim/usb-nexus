@@ -275,7 +275,12 @@ struct UiStrings {
 }
 
 async fn strings(Query(q): Query<LangQuery>) -> Response {
-    let lang = usbnexus_i18n::detect(q.lang.as_deref().filter(|l| !l.is_empty()));
+    // A choice, or the browser's languages ("fr-FR,tr,en"): the first one
+    // we have, else English. Without either, the computer's language.
+    let lang = match q.lang.as_deref().filter(|l| !l.is_empty()) {
+        Some(list) => list.split(',').find_map(usbnexus_i18n::match_locale).unwrap_or(usbnexus_i18n::FALLBACK),
+        None => usbnexus_i18n::detect(None),
+    };
     json(
         StatusCode::OK,
         &UiStrings { os: "web", lang, languages: usbnexus_i18n::languages(), messages: usbnexus_i18n::templates(lang) },

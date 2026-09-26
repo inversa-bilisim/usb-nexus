@@ -204,11 +204,22 @@ const VIEWS = [
   ["settings", "settings", "gui-nav-settings"],
 ];
 
+/** What this computer is set up for (both until the service says). */
+function roles() {
+  return (state.status && state.status.roles) || { server: true, client: true };
+}
+
+/** Views of the roles this computer has; the others are not shown at all. */
+function visibleViews() {
+  const r = roles();
+  return VIEWS.filter(([id]) => (id !== "this" || r.server) && ((id !== "network" && id !== "connected") || r.client));
+}
+
 function renderSidebar() {
   const nav = document.getElementById("nav");
   nav.setAttribute("aria-label", t("gui-nav-this-computer"));
   nav.replaceChildren(
-    ...VIEWS.map(([id, ic, key]) =>
+    ...visibleViews().map(([id, ic, key]) =>
       h(
         "button",
         {
@@ -680,10 +691,15 @@ async function pagePaired() {
       t("gui-paired-empty"),
     ),
   ];
+  const r = roles();
   return [
-    pageHead(t("gui-paired-title"), t("gui-paired-subtitle")),
-    ...section(t("gui-paired-servers"), peers.servers),
-    ...section(t("gui-paired-clients"), peers.clients, true),
+    pageHead(
+      t("gui-paired-title"),
+      t("gui-paired-subtitle"),
+      r.server ? h("button", { class: "btn primary", onclick: () => act(showPin) }, icon("plus"), t("gui-pair-new")) : null,
+    ),
+    ...(r.client ? section(t("gui-paired-servers"), peers.servers) : []),
+    ...(r.server ? section(t("gui-paired-clients"), peers.clients, true) : []),
   ];
 }
 
@@ -1038,7 +1054,56 @@ async function pageSettings() {
     h("label", { class: "field" }, t("gui-retention-days"), days),
     h("div", { class: "modal-actions" }, h("button", { class: "btn primary", type: "submit" }, t("gui-save"))),
   );
-  return [pageHead(t("gui-settings-title"), null), policyForm, retentionForm];
+  const r = status.roles || { server: true, client: true };
+  return [pageHead(t("gui-settings-title"), null), rolesForm(r), r.server ? policyForm : null, retentionForm];
+}
+
+// What this computer is used for; adding a role installs its drivers.
+function rolesForm(current) {
+  const server = h("input", { type: "checkbox", checked: current.server });
+  const client = h("input", { type: "checkbox", checked: current.client });
+  const note = h("p", { class: "note" }, t("gui-roles-client-note"));
+  const save = h("button", { class: "btn primary", type: "submit" }, t("gui-save"));
+  const update = () => {
+    save.disabled = !server.checked && !client.checked;
+    // Only Windows installs a driver (usbip-win2) for the client role.
+    note.hidden = !(state.os === "windows" && client.checked && !current.client);
+  };
+  server.addEventListener("change", update);
+  client.addEventListener("change", update);
+  update();
+  const form = h(
+    "form",
+    {
+      class: "card",
+      onsubmit: (e) => {
+        e.preventDefault();
+        act(async () => {
+          save.disabled = true;
+          save.textContent = t("gui-roles-applying");
+          try {
+            await api("set_roles", { server: server.checked, client: client.checked });
+            toast(t("gui-saved"));
+            state.status = await api("status");
+          } finally {
+            save.textContent = t("gui-save");
+          }
+          await render();
+        });
+      },
+    },
+    h("h2", {}, t("gui-roles-title")),
+    h("p", {}, t("gui-roles-body")),
+    h(
+      "div",
+      { class: "checks" },
+      h("label", { class: "check" }, server, h("span", {}, t("gui-role-server"))),
+      h("label", { class: "check" }, client, h("span", {}, t("gui-role-client"))),
+    ),
+    note,
+    h("div", { class: "modal-actions" }, save),
+  );
+  return form;
 }
 
 function pageServiceDown() {
@@ -1080,11 +1145,14 @@ async function render() {
     main.replaceChildren(pageServiceDown());
     return;
   }
+  // The current view may belong to a role this computer no longer has.
+  if (!visibleViews().some(([id]) => id === state.view)) state.view = visibleViews()[0][0];
   const seq = ++renderSeq;
   try {
     const content = await PAGES[state.view]();
     if (seq !== renderSeq) return; // a newer render started meanwhile
-    main.replaceChildren(h("div", { class: "page" }, content));
+    const reboot = state.status && state.status.reboot_required ? h("div", { class: "banner" }, t("gui-reboot-required")) : null;
+    main.replaceChildren(h("div", { class: "page" }, reboot, content));
   } catch (err) {
     if (err instanceof ServiceDown || seq !== renderSeq) return;
     main.replaceChildren(h("div", { class: "page" }, h("div", { class: "list" }, h("div", { class: "empty" }, errorText(err)))));
@@ -1102,7 +1170,7 @@ async function refresh() {
     /* handled by api() */
   }
   // First run: ask who may use shared devices (once per window).
-  if (state.status && !state.status.policy_chosen && !state.policyAsked && document.getElementById("modal").hidden) {
+  if (state.status && roles().server && !state.status.policy_chosen && !state.policyAsked && document.getElementById("modal").hidden) {
     state.policyAsked = true;
     policyDialog();
   }

@@ -86,22 +86,30 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   capped at 10 MB. Repeated refusals of one device to one computer are
   logged once per hour.
 
-## Agreed next features (owner, 2026-09-26; not implemented yet)
+## Agreed features (owner, 2026-09-26)
 
 ### Language follows the operating system
 - Done: installer has no language selector (`displayLanguageSelector:
   false`, English first = fallback); `usbnexus_i18n::detect` falls back to
   the OS preferred UI languages (`sys-locale`) after the `LANG`-style
   variables; the app's language box still wins.
-- Todo (with the installer rework below): installer-only texts in
-  `hooks.nsh` must come from one place per language so adding a language is
-  not forgotten there.
+- Installer texts are `setup-*` messages in `locales/*.ftl` (plain text),
+  generated into `packaging/windows/usbnexus-strings.nsh`; the web UI
+  follows the browser's languages.
 - More languages (e.g. French) will be added later: new `locales/xx.ftl`,
   `LOCALES`, and the NSIS `languages` list.
 
-### Role selection in the Windows installer
-- Custom page after the install directory (needs a custom Tauri NSIS
-  template), all ticked by default:
+### Role selection in the Windows installer (implemented; not yet tried on Windows)
+- Implementation: `packaging/windows/installer.nsi` is the tauri-cli 2.12.0
+  template (pinned in release.yml) + `usbnexus-pages.nsh`; texts are the
+  `setup-*` messages, generated into `usbnexus-strings.nsh` (test
+  `nsis_strings_are_current`). `service install --no-server --no-client
+  --web off|local|network --web-port --web-password-file` applies the
+  choices (`daemon::apply_setup`); config `roles` (None = both).
+  `Request::SetRoles` + `Daemon::set_backend_factory` switch roles at
+  runtime (Windows: `winservice::prepare_roles` installs VBoxUSB drivers or
+  the bundled usbip-win2; `status.reboot_required`).
+- Custom page after the install directory, all ticked by default:
   - "Use as server": installs VBoxUSB drivers (no extra explanation text).
   - "Use as client": installs the bundled usbip-win2 (replaces today's
     message box). While ticked, a note below says usbip-win2 will be

@@ -175,7 +175,8 @@ pub fn resolve(shared: &[SharedDevice], connected: &[LocalDevice]) -> Vec<Resolv
 /// when it is unplugged and plugged in again, on any port if it has a
 /// serial number. The set can change while the server runs.
 pub struct SharedExport {
-    host: Arc<dyn DeviceHost>,
+    /// Replaced when the computer's roles change.
+    host: std::sync::RwLock<Arc<dyn DeviceHost>>,
     state: Mutex<ShareState>,
     /// Devices seen by the last listing. Listing can block for a long time
     /// (on Windows it asks every hub for descriptors), so only
@@ -199,7 +200,7 @@ fn not_shared(what: &str) -> anyhow::Error {
 impl SharedExport {
     pub fn new(host: Arc<dyn DeviceHost>, shared: impl IntoIterator<Item = SharedDevice>, policy: Policy) -> Self {
         let state = ShareState { shared: shared.into_iter().collect(), policy, ports: HashMap::new() };
-        SharedExport { host, state: Mutex::new(state), connected: Mutex::new(None) }
+        SharedExport { host: std::sync::RwLock::new(host), state: Mutex::new(state), connected: Mutex::new(None) }
     }
 
     /// Devices of the last listing; lists them now if there was none yet.
@@ -211,13 +212,20 @@ impl SharedExport {
     }
 
     fn list_now(&self) -> Result<Vec<LocalDevice>> {
-        let list = self.host.list_all()?;
+        let list = self.host().list_all()?;
         *self.connected.lock().unwrap() = Some(list.clone());
         Ok(list)
     }
 
-    pub fn host(&self) -> &Arc<dyn DeviceHost> {
-        &self.host
+    pub fn host(&self) -> Arc<dyn DeviceHost> {
+        self.host.read().unwrap().clone()
+    }
+
+    /// Switches to another host (roles changed). Until the next
+    /// [`SharedExport::refresh`] no devices are listed.
+    pub fn set_host(&self, host: Arc<dyn DeviceHost>) {
+        *self.host.write().unwrap() = host;
+        *self.connected.lock().unwrap() = Some(vec![]);
     }
 
     /// The shared devices, in the order they were shared.
@@ -283,7 +291,7 @@ impl SharedExport {
         st.ports = ports;
         drop(st);
         for busid in left {
-            if let Err(e) = self.host.release(&busid) {
+            if let Err(e) = self.host().release(&busid) {
                 tracing::debug!(busid, "could not release a port: {e:#}");
             }
         }
@@ -334,7 +342,7 @@ impl SharedExport {
         st.shared.remove(index);
         drop(st);
         if let Some(d) = &before[index].device {
-            self.host.release(&d.info.busid)?;
+            self.host().release(&d.info.busid)?;
         }
         Ok(true)
     }
@@ -407,7 +415,10 @@ impl ExportBackend for SharedExport {
         let shared =
             self.snapshot().map(|(_, r)| r.iter().any(|r| r.device.as_ref().is_some_and(|d| d.info.busid == busid)));
         match shared {
-            Ok(true) => self.host.export(busid),
+            Ok(true) => {
+                let host = self.host();
+                Box::pin(async move { host.export(busid).await })
+            }
             Ok(false) => Box::pin(async move { Err(not_shared(busid)) }),
             Err(e) => Box::pin(async move { Err(e) }),
         }

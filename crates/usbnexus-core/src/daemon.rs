@@ -57,6 +57,11 @@ pub struct DaemonOptions {
     pub events: Option<Arc<dyn Fn(ServerEvent) + Send + Sync>>,
 }
 
+/// Builds the backends for a set of roles, installing what they need first
+/// (drivers); also returns whether that needs a restart of the computer.
+pub type BackendFactory =
+    Arc<dyn Fn(Roles) -> Result<(Arc<dyn DeviceHost>, Arc<dyn ImportBackend>, bool)> + Send + Sync>;
+
 fn default_retention() -> u32 {
     DEFAULT_RETENTION_DAYS
 }
@@ -124,7 +129,10 @@ struct Inner {
     export: Arc<SharedExport>,
     client: ClientConfig,
     clients: TrustStore,
-    import: Arc<dyn ImportBackend>,
+    /// Replaced when the roles change (see [`BackendFactory`]).
+    import: Mutex<Arc<dyn ImportBackend>>,
+    backends: Mutex<Option<BackendFactory>>,
+    reboot_required: std::sync::atomic::AtomicBool,
     attachments: Mutex<HashMap<Key, Slot>>,
     usage: Arc<UsageLog>,
     poller: Mutex<Option<JoinHandle<()>>>,
@@ -330,7 +338,9 @@ impl Daemon {
                 export,
                 client: ClientConfig { name: opts.name, identity, trust: servers },
                 clients,
-                import: opts.import,
+                import: Mutex::new(opts.import),
+                backends: Mutex::new(None),
+                reboot_required: Default::default(),
                 attachments: Mutex::new(HashMap::new()),
                 usage,
                 poller: Mutex::new(None),
@@ -344,8 +354,10 @@ impl Daemon {
             tokio::task::spawn_blocking(move || d.poll_devices()).await?;
         }
         *daemon.inner.poller.lock().unwrap() = Some(daemon.spawn_poller());
-        for a in saved {
-            daemon.spawn_attachment(&a.server, &a.device);
+        if daemon.roles().client {
+            for a in saved {
+                daemon.spawn_attachment(&a.server, &a.device);
+            }
         }
         daemon.restart_web().await;
         Ok(daemon)
@@ -353,6 +365,68 @@ impl Daemon {
 
     pub fn server(&self) -> &Server {
         &self.inner.server
+    }
+
+    fn roles(&self) -> Roles {
+        self.inner.config.lock().unwrap().roles.unwrap_or_default()
+    }
+
+    /// Lets the service switch backends when the roles change; without it,
+    /// `set_roles` only records them.
+    pub fn set_backend_factory(&self, factory: BackendFactory) {
+        *self.inner.backends.lock().unwrap() = Some(factory);
+    }
+
+    /// Applies new roles: prepares and switches the backends, ends what the
+    /// dropped roles were doing and resumes saved attachments for a new
+    /// client role. Returns whether the computer needs a restart.
+    async fn set_roles(&self, roles: Roles) -> Result<bool> {
+        if !roles.server && !roles.client {
+            return Err(ApiError::new("invalid", "at least one role is needed").into());
+        }
+        let old = self.roles();
+        let factory = self.inner.backends.lock().unwrap().clone();
+        if let Some(factory) = factory {
+            // Installing drivers can take a while.
+            let (host, import, reboot) = tokio::task::spawn_blocking(move || factory(roles)).await??;
+            if old.server && !roles.server {
+                self.inner.server.disconnect(|_, _| true);
+                self.release_shared();
+            }
+            if old.client && !roles.client {
+                for (_, slot) in self.inner.attachments.lock().unwrap().drain() {
+                    // Closing the relay makes the OS detach the device.
+                    slot.task.abort();
+                }
+            }
+            self.inner.export.set_host(host);
+            *self.inner.import.lock().unwrap() = import;
+            if reboot {
+                self.inner.reboot_required.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let d = self.clone();
+            tokio::task::spawn_blocking(move || d.poll_devices()).await?;
+        }
+        self.inner.config.lock().unwrap().roles = Some(roles);
+        self.save()?;
+        if !old.client && roles.client {
+            let saved = self.inner.config.lock().unwrap().attachments.clone();
+            for a in saved {
+                self.spawn_attachment(&a.server, &a.device);
+            }
+        }
+        Ok(self.inner.reboot_required.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Returns shared devices that are plugged in to their normal drivers.
+    fn release_shared(&self) {
+        let Ok((_, resolved)) = self.inner.export.snapshot() else { return };
+        let host = self.inner.export.host();
+        for busid in resolved.into_iter().filter_map(|r| r.device).map(|d| d.info.busid) {
+            if let Err(e) = host.release(&busid) {
+                warn!(busid, "could not release device: {e:#}");
+            }
+        }
     }
 
     /// Stops attachments and returns shared devices to their drivers.
@@ -366,12 +440,7 @@ impl Daemon {
         for (_, slot) in self.inner.attachments.lock().unwrap().drain() {
             slot.task.abort();
         }
-        let Ok((_, resolved)) = self.inner.export.snapshot() else { return };
-        for busid in resolved.into_iter().filter_map(|r| r.device).map(|d| d.info.busid) {
-            if let Err(e) = self.inner.export.host().release(&busid) {
-                warn!(busid, "could not release device: {e:#}");
-            }
-        }
+        self.release_shared();
     }
 
     fn save(&self) -> Result<()> {
@@ -434,7 +503,7 @@ impl Daemon {
         }
         let state = Arc::new(Mutex::new(AttachState::Connecting));
         let seen = Arc::new(Mutex::new(None));
-        let (cfg, import) = (self.inner.client.clone(), self.inner.import.clone());
+        let (cfg, import) = (self.inner.client.clone(), self.inner.import.lock().unwrap().clone());
         let (st, seen2) = (state.clone(), seen.clone());
         let weak = Arc::downgrade(&self.inner);
         let (fp, dev) = key.clone();
@@ -684,6 +753,7 @@ impl Daemon {
                 ok(StatusView {
                     name: inner.name.clone(),
                     roles,
+                    reboot_required: inner.reboot_required.load(std::sync::atomic::Ordering::Relaxed),
                     fingerprint: inner.fingerprint.clone(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     listen: inner.listen.clone(),
@@ -875,6 +945,10 @@ impl Daemon {
                 ok(())
             }
             Request::WebStatus => ok(self.web_status().await),
+            Request::SetRoles { server, client } => {
+                let reboot_required = self.set_roles(Roles { server, client }).await?;
+                ok(serde_json::json!({ "reboot_required": reboot_required }))
+            }
             Request::WebConfigure { enabled, lan, port, password } => {
                 let hash = match password {
                     Some(p) => Some(tokio::task::spawn_blocking(move || web::hash_password(&p)).await??),

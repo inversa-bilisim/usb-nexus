@@ -395,11 +395,24 @@ fn hex4(v: u16) -> String {
 /// Runs the service in the foreground. `serve` is the same with devices to
 /// share given on the command line (they are remembered).
 /// Picks the platform backends for the service.
-fn backends(
-    opts: &ServeOpts,
-) -> Result<(Arc<dyn usbnexus_core::backend::DeviceHost>, Arc<dyn usbnexus_core::backend::ImportBackend>)> {
+type Backends = (Arc<dyn usbnexus_core::backend::DeviceHost>, Arc<dyn usbnexus_core::backend::ImportBackend>);
+
+/// Backends for `roles`: a computer set up for one role only does not touch
+/// the other's drivers (e.g. no hub queries and no VBoxUSB on a client).
+fn backends_for(demo: bool, roles: usbnexus_core::api::Roles) -> Result<Backends> {
+    let (mut host, mut import) = backends(demo)?;
+    if !roles.server {
+        host = Arc::new(usbnexus_core::backend::NoHost);
+    }
+    if !roles.client {
+        import = Arc::new(usbnexus_core::backend::UnsupportedImport);
+    }
+    Ok((host, import))
+}
+
+fn backends(demo: bool) -> Result<Backends> {
     use usbnexus_core::backend::demo::{DemoHost, DemoImport};
-    if opts.demo {
+    if demo {
         return Ok((Arc::new(DemoHost), Arc::new(DemoImport::default())));
     }
     #[cfg(target_os = "linux")]
@@ -464,16 +477,7 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
     use usbnexus_core::daemon::{Daemon, DaemonOptions};
     use usbnexus_core::server::ServerEvent;
 
-    let (mut host, mut import) = backends(&opts)?;
-    // A computer set up for one role only does not touch the other's
-    // drivers (e.g. no hub queries and no VBoxUSB on a client).
-    let roles = usbnexus_core::daemon::saved_roles(&ctx.dir);
-    if !roles.server {
-        host = Arc::new(usbnexus_core::backend::NoHost);
-    }
-    if !roles.client {
-        import = Arc::new(usbnexus_core::backend::UnsupportedImport);
-    }
+    let (host, import) = backends_for(opts.demo, usbnexus_core::daemon::saved_roles(&ctx.dir))?;
     let label = |u: &usbnexus_core::server::DeviceUse| u.device_name.clone().unwrap_or_else(|| u.device.clone());
     let events = Arc::new(move |ev: ServerEvent| match ev {
         ServerEvent::Paired { name, .. } => println!("{}", t!("serve-paired", name = name)),
@@ -496,6 +500,16 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
         events: Some(events),
     })
     .await?;
+    let demo = opts.demo;
+    d.set_backend_factory(Arc::new(move |roles| {
+        // Install what the new roles need (drivers) before using them.
+        #[cfg(windows)]
+        let reboot = if demo { false } else { winservice::prepare_roles(roles)? };
+        #[cfg(not(windows))]
+        let reboot = false;
+        let (host, import) = backends_for(demo, roles)?;
+        Ok((host, import, reboot))
+    }));
 
     for busid in &opts.export {
         if let Response::Error { error } = d.handle(Request::SetShared { device: busid.clone(), shared: true }).await {

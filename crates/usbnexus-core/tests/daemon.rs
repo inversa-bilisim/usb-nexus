@@ -148,3 +148,41 @@ async fn attach_requires_pairing_and_bad_requests_are_rejected() {
     BufReader::new(s).read_line(&mut line).await.unwrap();
     assert!(line.contains("\"invalid\""), "{line}");
 }
+
+#[tokio::test]
+async fn roles_switch_backends() {
+    use usbnexus_core::api::{ApiError, Roles};
+    use usbnexus_core::backend::{DeviceHost, NoHost};
+
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "roles").await;
+    let status: StatusView = call(&n, Request::Status).await;
+    assert_eq!(status.roles, Roles { server: true, client: true });
+    assert!(!status.reboot_required);
+    assert!(!call::<Vec<LocalDeviceView>>(&n, Request::LocalDevices).await.is_empty());
+
+    // What the service does on Windows: a sharing-free host for a client,
+    // and (here) a restart needed after dropping the server role.
+    n.daemon.set_backend_factory(Arc::new(|roles: Roles| {
+        let host: Arc<dyn DeviceHost> = if roles.server { Arc::new(DemoHost) } else { Arc::new(NoHost) };
+        Ok((host, Arc::new(DemoImport::default()) as _, !roles.server))
+    }));
+    let r: serde_json::Value = call(&n, Request::SetRoles { server: false, client: true }).await;
+    assert_eq!(r["reboot_required"], true);
+    assert!(
+        call::<Vec<LocalDeviceView>>(&n, Request::LocalDevices).await.is_empty(),
+        "no devices without the server role"
+    );
+    let status: StatusView = call(&n, Request::Status).await;
+    assert_eq!(status.roles, Roles { server: false, client: true });
+    assert!(status.reboot_required);
+
+    let e = api::call::<serde_json::Value>(&n.socket, &Request::SetRoles { server: false, client: false })
+        .await
+        .unwrap_err();
+    assert_eq!(e.downcast_ref::<ApiError>().map(|e| e.code.as_str()), Some("invalid"));
+
+    call::<serde_json::Value>(&n, Request::SetRoles { server: true, client: true }).await;
+    assert!(!call::<Vec<LocalDeviceView>>(&n, Request::LocalDevices).await.is_empty());
+    assert_eq!(usbnexus_core::daemon::saved_roles(dir.path()), Roles { server: true, client: true });
+}

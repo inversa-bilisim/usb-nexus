@@ -829,3 +829,12 @@ select {
 .nowrap {
   white-space: nowrap;
 }
+
+.banner {
+  max-width: 640px;
+  margin-bottom: 18px;
+  padding: 10px 14px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-radius: var(--radius);
+}

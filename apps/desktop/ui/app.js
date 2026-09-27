@@ -815,13 +815,14 @@ async function deviceDialog(id) {
 
   // --- status column
   const disconnect = h("button", { class: "btn small danger", type: "button" }, t("gui-disconnect-user"));
+  // The client asks for the device again by itself, so the dialog stays
+  // open and says how to keep it away for good (untick it on the left).
   disconnect.onclick = () =>
     act(async () => {
       disconnect.disabled = true;
       await api("disconnect", { device: d.id });
-      toast(t("gui-disconnected-user", { name: d.used_by }));
-      close();
-      await refresh();
+      user.replaceChildren(h("span", { class: "note" }, t("gui-disconnected-note", { name: d.used_by })));
+      refresh();
     });
   const user = d.used_by
     ? h(

@@ -59,7 +59,7 @@ service-removed = USB Nexus servis je uklonjen.
 
 ## Server
 
-serve-started = Server „{ $name }” slušа na { $addr }.
+serve-started = Server „{ $name }” sluša na { $addr }.
 serve-fingerprint = Otisak: { $fp }
 serve-exporting = Deljeni uređaji:
 serve-no-exports = Nijedan uređaj nije deljen. Dodajte --export BUSID (lista uređaja: usbnexus local).

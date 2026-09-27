@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::access::{DeviceAccess, DeviceMode, Policy};
 use crate::client::ClientError;
 use crate::control::RemoteError;
+use crate::handover::{DeviceKind, Handover, HandoverMode};
 use crate::trust::Peer;
 use crate::usage::UsageEntry;
 
@@ -86,6 +87,23 @@ pub enum Request {
         fingerprint: String,
     },
     WebStatus,
+    /// Ends the current use of a shared device (the client may ask again).
+    Disconnect {
+        device: String,
+    },
+    /// Changes when a shared device is handed to the next waiting computer.
+    SetDeviceHandover {
+        device: String,
+        mode: HandoverMode,
+        #[serde(default)]
+        seconds: Option<u32>,
+    },
+    /// Changes what this computer is set up for, installing what the new
+    /// roles need (drivers) first. At least one role must remain.
+    SetRoles {
+        server: bool,
+        client: bool,
+    },
     /// Changes the web interface settings; fields left out are unchanged.
     /// Refused when it arrives through the web interface itself.
     WebConfigure {
@@ -166,6 +184,15 @@ pub struct PairingView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusView {
     pub name: String,
+    /// What this computer is set up for; interfaces hide the other screens.
+    #[serde(default)]
+    pub roles: Roles,
+    /// Something installed for a role needs a restart of the computer.
+    #[serde(default)]
+    pub reboot_required: bool,
+    /// What this computer still needs for its roles (e.g. kernel modules).
+    #[serde(default)]
+    pub setup_issues: Vec<SetupIssue>,
     pub fingerprint: String,
     pub version: String,
     pub listen: String,
@@ -175,6 +202,33 @@ pub struct StatusView {
     /// Whether the policy was chosen explicitly (user interfaces ask on
     /// first run otherwise).
     pub policy_chosen: bool,
+}
+
+/// Something a role of this computer needs but does not have.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetupIssue {
+    /// `kernel_modules_missing`: `detail` lists the modules.
+    pub code: String,
+    pub detail: String,
+    /// A command that fixes it on this system, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// What a computer is set up for. Both by default (and for configurations
+/// from before roles existed).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Roles {
+    /// Shares its own USB devices.
+    pub server: bool,
+    /// Uses USB devices of other computers.
+    pub client: bool,
+}
+
+impl Default for Roles {
+    fn default() -> Self {
+        Roles { server: true, client: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,6 +254,30 @@ pub struct LocalDeviceView {
     pub open_to_all: bool,
     /// Name of the client currently using the device.
     pub used_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_by_fingerprint: Option<String>,
+    /// When the current use started (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_since: Option<u64>,
+    /// Computers waiting for the device, first in line first.
+    #[serde(default)]
+    pub queue: Vec<QueueEntry>,
+    /// What kind of device it is (while plugged in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<DeviceKind>,
+    /// The automatic handover setting of a shared device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handover: Option<Handover>,
+    /// Idle seconds after which the device goes to the next computer, as
+    /// currently in effect (`None`: it stays with its user).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handover_seconds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueEntry {
+    pub name: String,
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -251,6 +329,11 @@ pub enum AttachState {
         seconds: u64,
         error: ApiError,
     },
+    /// Another computer uses the device; this one is `position` in the
+    /// queue (1 = next).
+    Queued {
+        position: u32,
+    },
     /// Detached on this computer (device removed or detached by the OS).
     Stopped,
     Failed {
@@ -285,6 +368,10 @@ pub struct WebStatusView {
     pub urls: Vec<String>,
     /// SHA-256 fingerprint of the HTTPS certificate, to check browser warnings.
     pub fingerprint: Option<String>,
+    /// The certificate is in this computer's trusted root store, so local
+    /// browsers show no warning (Windows, macOS).
+    #[serde(default)]
+    pub trusted_locally: bool,
     /// Why the interface is not running although enabled.
     pub error: Option<String>,
 }
@@ -461,19 +548,33 @@ mod windows {
         let mut server = create(&name, true, allow_all)?;
         Ok(async move {
             loop {
-                if server.connect().await.is_err() {
-                    continue;
-                }
-                let connected = server;
-                server = match create(&name, false, allow_all) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("named pipe stopped: {e:#}");
-                        return;
+                let connected = server.connect().await;
+                // Every connection attempt, failed or not, uses up this pipe
+                // instance: a failed one (e.g. ERROR_NO_DATA when a client
+                // closed before we accepted it) fails again immediately and
+                // without yielding, which would spin forever and starve the
+                // runtime. Always continue with a fresh instance.
+                let next = loop {
+                    match create(&name, false, allow_all) {
+                        Ok(s) => break s,
+                        Err(e) => {
+                            tracing::error!("creating the named pipe failed: {e:#}");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
                     }
                 };
-                let (r, w) = tokio::io::split(connected);
-                tokio::spawn(super::serve_connection(r, w, daemon.clone()));
+                let used = std::mem::replace(&mut server, next);
+                match connected {
+                    Ok(()) => {
+                        let (r, w) = tokio::io::split(used);
+                        tokio::spawn(super::serve_connection(r, w, daemon.clone()));
+                    }
+                    Err(e) => {
+                        tracing::debug!("named pipe client went away: {e}");
+                        drop(used);
+                        tokio::task::yield_now().await;
+                    }
+                }
             }
         })
     }
@@ -525,7 +626,8 @@ mod tests {
 
     #[test]
     fn error_codes() {
-        let e: anyhow::Error = RemoteError { code: ErrorCode::DeviceBusy, message: "x".into() }.into();
+        let e: anyhow::Error =
+            RemoteError { code: ErrorCode::DeviceBusy, message: "x".into(), queue_position: None }.into();
         assert_eq!(ApiError::from_anyhow(&e).code, "device_busy");
         let e: anyhow::Error = ClientError::PairingRequired { name: "a".into(), fingerprint: "b".into() }.into();
         assert_eq!(ApiError::from_anyhow(&e).code, "pairing_required");

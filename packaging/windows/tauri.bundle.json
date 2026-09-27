@@ -14,12 +14,14 @@
           "English",
           "Turkish"
         ],
-        "displayLanguageSelector": true,
-        "installerHooks": "../../../packaging/windows/hooks.nsh"
+        "displayLanguageSelector": false,
+        "installerHooks": "../../../packaging/windows/hooks.nsh",
+        "template": "../../../packaging/windows/installer.nsi"
       }
     },
     "resources": {
-      "../../../packaging/windows/drivers/": "drivers/"
+      "../../../packaging/windows/drivers/": "drivers/",
+      "../../../packaging/windows/usbip-win2/": "usbip-win2/"
     }
   }
 }

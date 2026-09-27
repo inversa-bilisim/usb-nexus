@@ -65,13 +65,13 @@ pub fn with_default_port(addr: &str) -> String {
 }
 
 fn remote(code: ErrorCode, message: String) -> anyhow::Error {
-    RemoteError { code, message }.into()
+    RemoteError { code, message, queue_position: None }.into()
 }
 
 async fn expect<T>(s: &mut TlsStream<TcpStream>, f: impl FnOnce(ServerMsg) -> Option<T>) -> Result<T> {
     let msg: ServerMsg = timeout(REPLY_TIMEOUT, read_frame(s)).await.context("server did not reply")??;
-    if let ServerMsg::Error { code, message } = msg {
-        return Err(remote(code, message));
+    if let ServerMsg::Error { code, message, queue_position } = msg {
+        return Err(RemoteError { code, message, queue_position }.into());
     }
     f(msg).ok_or_else(|| remote(ErrorCode::Protocol, "unexpected reply".into()))
 }
@@ -248,12 +248,20 @@ pub enum AttachEvent {
     Retrying {
         delay: Duration,
     },
+    /// Another computer uses the device; this one is `position` in its
+    /// queue (1 = next) and asks again soon.
+    Queued {
+        position: u32,
+    },
     /// The device was detached locally; the loop has ended.
     Detached,
 }
 
 /// How often to ask again for a device that is not plugged in.
 const DEVICE_WAIT: Duration = Duration::from_secs(5);
+/// How often a queued client asks again: well within the server's queue
+/// lifetime and its reservation for the next in line.
+const QUEUE_WAIT: Duration = Duration::from_secs(2);
 
 /// Whether an error cannot be fixed by retrying. A missing device or a
 /// missing permission is not permanent: the device may be plugged in, or
@@ -292,6 +300,13 @@ pub async fn attach_forever(
             Err(e) => {
                 let error = crate::api::ApiError::from_anyhow(&e);
                 let missing = error.code == "no_such_device";
+                let queued = e.downcast_ref::<RemoteError>().and_then(|r| r.queue_position);
+                if let Some(position) = queued {
+                    debug!(position, "waiting in the device queue");
+                    events(AttachEvent::Queued { position });
+                    tokio::time::sleep(QUEUE_WAIT).await;
+                    continue;
+                }
                 if missing {
                     debug!("waiting for the device: {e:#}");
                 } else {

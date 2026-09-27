@@ -24,7 +24,9 @@
   }
 
   async function strings(lang) {
-    const r = await fetch("/api/strings?lang=" + encodeURIComponent(lang || ""));
+    // Without a choice, the browser's languages in order of preference.
+    const wanted = lang || (navigator.languages || [navigator.language]).join(",");
+    const r = await fetch("/api/strings?lang=" + encodeURIComponent(wanted));
     const s = await r.json();
     messages = s.messages;
     return s;

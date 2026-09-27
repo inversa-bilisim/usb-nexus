@@ -13,7 +13,7 @@
 //! unplugged stays shared and is offered again when it comes back.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,15 +23,16 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::access::{DeviceAccess, Policy};
+use crate::access::Policy;
 use crate::api::{
-    ApiError, AttachState, AttachmentView, DiscoveredView, LocalDeviceView, PairingView, PeersView, RemoteDeviceView,
-    Request, Response, StatusView, UsageView, WebStatusView,
+    ApiError, AttachState, AttachmentView, DiscoveredView, LocalDeviceView, PairingView, PeersView, QueueEntry,
+    RemoteDeviceView, Request, Response, Roles, SetupIssue, StatusView, UsageView, WebStatusView,
 };
 use crate::backend::{DeviceHost, ImportBackend, SharedDevice, SharedExport};
 use crate::client::{self, AttachEvent, ClientConfig, Target};
 use crate::device_id::DeviceId;
 use crate::discovery;
+use crate::handover::{DeviceKind, Handover};
 use crate::identity::Identity;
 use crate::server::{DeviceUse, Server, ServerConfig, ServerEvent};
 use crate::trust::TrustStore;
@@ -57,6 +58,14 @@ pub struct DaemonOptions {
     pub events: Option<Arc<dyn Fn(ServerEvent) + Send + Sync>>,
 }
 
+/// Reports what the computer still needs for `roles`.
+pub type SetupCheck = Arc<dyn Fn(Roles) -> Vec<SetupIssue> + Send + Sync>;
+
+/// Builds the backends for a set of roles, installing what they need first
+/// (drivers); also returns whether that needs a restart of the computer.
+pub type BackendFactory =
+    Arc<dyn Fn(Roles) -> Result<(Arc<dyn DeviceHost>, Arc<dyn ImportBackend>, bool)> + Send + Sync>;
+
 fn default_retention() -> u32 {
     DEFAULT_RETENTION_DAYS
 }
@@ -75,6 +84,9 @@ struct Config {
     web: WebSettings,
     #[serde(default = "default_retention")]
     usage_retention_days: u32,
+    /// Set by the installer; `None` (older versions): both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roles: Option<Roles>,
 }
 
 impl Default for Config {
@@ -85,6 +97,7 @@ impl Default for Config {
             attachments: vec![],
             web: WebSettings::default(),
             usage_retention_days: DEFAULT_RETENTION_DAYS,
+            roles: None,
         }
     }
 }
@@ -120,7 +133,11 @@ struct Inner {
     export: Arc<SharedExport>,
     client: ClientConfig,
     clients: TrustStore,
-    import: Arc<dyn ImportBackend>,
+    /// Replaced when the roles change (see [`BackendFactory`]).
+    import: Mutex<Arc<dyn ImportBackend>>,
+    backends: Mutex<Option<BackendFactory>>,
+    setup_check: Mutex<Option<SetupCheck>>,
+    reboot_required: std::sync::atomic::AtomicBool,
     attachments: Mutex<HashMap<Key, Slot>>,
     usage: Arc<UsageLog>,
     poller: Mutex<Option<JoinHandle<()>>>,
@@ -182,6 +199,74 @@ fn refers_to(saved: &str, id: &str, busid: Option<&str>) -> bool {
     saved == id || (DeviceId::parse(saved).is_legacy() && Some(saved) == busid)
 }
 
+fn read_config(path: &Path) -> Result<Config> {
+    match std::fs::read(path) {
+        Ok(data) => serde_json::from_slice(&data).with_context(|| format!("parsing {}", path.display())),
+        Err(_) => Ok(Config::default()),
+    }
+}
+
+fn write_config(path: &Path, config: &Config) -> Result<()> {
+    let data = serde_json::to_vec_pretty(config)?;
+    let tmp = path.with_extension("tmp");
+    // Holds the web password hash: owner-only.
+    crate::identity::write_private(&tmp, &data)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Settings an installer applies while the service is stopped; `None`
+/// fields keep their current value.
+#[derive(Debug, Default)]
+pub struct Setup {
+    pub roles: Option<Roles>,
+    /// Turns the web interface on or off.
+    pub web_enabled: Option<bool>,
+    pub web_lan: Option<bool>,
+    pub web_port: Option<u16>,
+    /// New web password (at least 8 characters).
+    pub web_password: Option<String>,
+}
+
+/// Roles saved in `state_dir`; both if none were chosen.
+pub fn saved_roles(state_dir: &Path) -> Roles {
+    read_config(&state_dir.join("config.json")).ok().and_then(|c| c.roles).unwrap_or_default()
+}
+
+/// Web settings saved in `state_dir`.
+pub fn saved_web(state_dir: &Path) -> WebSettings {
+    read_config(&state_dir.join("config.json")).map(|c| c.web).unwrap_or_default()
+}
+
+/// Writes `setup` into the configuration in `state_dir`, for the next
+/// start of the service. Enabling the web interface needs a password,
+/// given now or set before.
+pub fn apply_setup(state_dir: &Path, setup: Setup) -> Result<()> {
+    std::fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
+    let path = state_dir.join("config.json");
+    let mut config = read_config(&path)?;
+    if let Some(roles) = setup.roles {
+        config.roles = Some(roles);
+    }
+    let web = &mut config.web;
+    if let Some(password) = setup.web_password {
+        web.password_hash = Some(web::hash_password(&password)?);
+    }
+    if let Some(lan) = setup.web_lan {
+        web.lan = lan;
+    }
+    if let Some(port) = setup.web_port {
+        web.port = Some(port);
+    }
+    if let Some(enabled) = setup.web_enabled {
+        if enabled && web.password_hash.is_none() {
+            return Err(ApiError::new("password_required", "set a web password first").into());
+        }
+        web.enabled = enabled;
+    }
+    write_config(&path, &config)
+}
+
 impl Daemon {
     /// Loads state, starts the server and restores saved attachments.
     pub async fn start(opts: DaemonOptions) -> Result<Daemon> {
@@ -190,10 +275,7 @@ impl Daemon {
         let clients = TrustStore::load(&opts.state_dir.join("trusted-clients.json"))?;
         let servers = TrustStore::load(&opts.state_dir.join("trusted-servers.json"))?;
         let config_path = opts.state_dir.join("config.json");
-        let config: Config = match std::fs::read(&config_path) {
-            Ok(data) => serde_json::from_slice(&data).with_context(|| format!("parsing {}", config_path.display()))?,
-            Err(_) => Config::default(),
-        };
+        let config = read_config(&config_path)?;
         let usage = Arc::new(UsageLog::open(&opts.state_dir.join("usage.log"), config.usage_retention_days));
 
         let export =
@@ -261,7 +343,10 @@ impl Daemon {
                 export,
                 client: ClientConfig { name: opts.name, identity, trust: servers },
                 clients,
-                import: opts.import,
+                import: Mutex::new(opts.import),
+                backends: Mutex::new(None),
+                setup_check: Mutex::new(None),
+                reboot_required: Default::default(),
                 attachments: Mutex::new(HashMap::new()),
                 usage,
                 poller: Mutex::new(None),
@@ -270,10 +355,15 @@ impl Daemon {
                 web: tokio::sync::Mutex::new(Ok(None)),
             }),
         };
-        daemon.poll_devices();
+        {
+            let d = daemon.clone();
+            tokio::task::spawn_blocking(move || d.poll_devices()).await?;
+        }
         *daemon.inner.poller.lock().unwrap() = Some(daemon.spawn_poller());
-        for a in saved {
-            daemon.spawn_attachment(&a.server, &a.device);
+        if daemon.roles().client {
+            for a in saved {
+                daemon.spawn_attachment(&a.server, &a.device);
+            }
         }
         daemon.restart_web().await;
         Ok(daemon)
@@ -281,6 +371,74 @@ impl Daemon {
 
     pub fn server(&self) -> &Server {
         &self.inner.server
+    }
+
+    fn roles(&self) -> Roles {
+        self.inner.config.lock().unwrap().roles.unwrap_or_default()
+    }
+
+    /// Lets the service switch backends when the roles change; without it,
+    /// `set_roles` only records them.
+    pub fn set_backend_factory(&self, factory: BackendFactory) {
+        *self.inner.backends.lock().unwrap() = Some(factory);
+    }
+
+    /// Lets the service report what the computer still needs for its
+    /// roles (asked on every status request, so keep it cheap).
+    pub fn set_setup_check(&self, check: SetupCheck) {
+        *self.inner.setup_check.lock().unwrap() = Some(check);
+    }
+
+    /// Applies new roles: prepares and switches the backends, ends what the
+    /// dropped roles were doing and resumes saved attachments for a new
+    /// client role. Returns whether the computer needs a restart.
+    async fn set_roles(&self, roles: Roles) -> Result<bool> {
+        if !roles.server && !roles.client {
+            return Err(ApiError::new("invalid", "at least one role is needed").into());
+        }
+        let old = self.roles();
+        let factory = self.inner.backends.lock().unwrap().clone();
+        if let Some(factory) = factory {
+            // Installing drivers can take a while.
+            let (host, import, reboot) = tokio::task::spawn_blocking(move || factory(roles)).await??;
+            if old.server && !roles.server {
+                self.inner.server.disconnect(|_, _| true);
+                self.release_shared();
+            }
+            if old.client && !roles.client {
+                for (_, slot) in self.inner.attachments.lock().unwrap().drain() {
+                    // Closing the relay makes the OS detach the device.
+                    slot.task.abort();
+                }
+            }
+            self.inner.export.set_host(host);
+            *self.inner.import.lock().unwrap() = import;
+            if reboot {
+                self.inner.reboot_required.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let d = self.clone();
+            tokio::task::spawn_blocking(move || d.poll_devices()).await?;
+        }
+        self.inner.config.lock().unwrap().roles = Some(roles);
+        self.save()?;
+        if !old.client && roles.client {
+            let saved = self.inner.config.lock().unwrap().attachments.clone();
+            for a in saved {
+                self.spawn_attachment(&a.server, &a.device);
+            }
+        }
+        Ok(self.inner.reboot_required.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Returns shared devices that are plugged in to their normal drivers.
+    fn release_shared(&self) {
+        let Ok((_, resolved)) = self.inner.export.snapshot() else { return };
+        let host = self.inner.export.host();
+        for busid in resolved.into_iter().filter_map(|r| r.device).map(|d| d.info.busid) {
+            if let Err(e) = host.release(&busid) {
+                warn!(busid, "could not release device: {e:#}");
+            }
+        }
     }
 
     /// Stops attachments and returns shared devices to their drivers.
@@ -294,24 +452,14 @@ impl Daemon {
         for (_, slot) in self.inner.attachments.lock().unwrap().drain() {
             slot.task.abort();
         }
-        let Ok((_, resolved)) = self.inner.export.snapshot() else { return };
-        for busid in resolved.into_iter().filter_map(|r| r.device).map(|d| d.info.busid) {
-            if let Err(e) = self.inner.export.host().release(&busid) {
-                warn!(busid, "could not release device: {e:#}");
-            }
-        }
+        self.release_shared();
     }
 
     fn save(&self) -> Result<()> {
         // The lock is held until the file is replaced, so saves from the
         // device poller and API requests do not interleave.
         let config = self.inner.config.lock().unwrap();
-        let data = serde_json::to_vec_pretty(&*config)?;
-        let tmp = self.inner.config_path.with_extension("tmp");
-        // Holds the web password hash: owner-only.
-        crate::identity::write_private(&tmp, &data)?;
-        std::fs::rename(&tmp, &self.inner.config_path)?;
-        Ok(())
+        write_config(&self.inner.config_path, &config)
     }
 
     /// Saves the shared devices after a change and ends sessions the new
@@ -367,7 +515,7 @@ impl Daemon {
         }
         let state = Arc::new(Mutex::new(AttachState::Connecting));
         let seen = Arc::new(Mutex::new(None));
-        let (cfg, import) = (self.inner.client.clone(), self.inner.import.clone());
+        let (cfg, import) = (self.inner.client.clone(), self.inner.import.lock().unwrap().clone());
         let (st, seen2) = (state.clone(), seen.clone());
         let weak = Arc::downgrade(&self.inner);
         let (fp, dev) = key.clone();
@@ -406,6 +554,7 @@ impl Daemon {
                         "no_such_device" | "access_denied" => AttachState::Waiting { seconds: 0, error },
                         _ => AttachState::Retrying { seconds: 0, error },
                     },
+                    AttachEvent::Queued { position } => AttachState::Queued { position },
                     AttachEvent::Detached => AttachState::Stopped,
                 };
                 *st.lock().unwrap() = next;
@@ -498,13 +647,31 @@ impl Daemon {
     async fn restart_web(&self) {
         let settings = self.inner.config.lock().unwrap().web.clone();
         let mut slot = self.inner.web.lock().await;
-        *slot = Ok(None); // stop the old one (and drop its sessions) first
+        // Stop the old one (and drop its sessions) first.
+        if let Ok(Some(old)) = std::mem::replace(&mut *slot, Ok(None)) {
+            old.stop().await;
+        }
         if !settings.enabled {
             return;
         }
         let started = async {
             let id = web::web_identity(&self.inner.state_dir, &self.inner.name)?;
-            web::start(self.clone(), &self.inner.name, &id, &settings).await
+            let mut server = web::start(self.clone(), &self.inner.name, &id, &settings).await?;
+            // Let this computer's browsers trust the certificate (Windows,
+            // macOS). Failing is not fatal: the interface still works, with
+            // a warning.
+            if web::can_trust_locally() {
+                let path = web::cert_path(&self.inner.state_dir);
+                server.trusted_locally = match tokio::task::spawn_blocking(move || web::trust_locally(&path)).await {
+                    Ok(Ok(trusted)) => trusted,
+                    Ok(Err(e)) => {
+                        warn!("web certificate not added to the trusted store: {e:#}");
+                        false
+                    }
+                    Err(_) => false,
+                };
+            }
+            Ok::<_, anyhow::Error>(server)
         }
         .await;
         *slot = match started {
@@ -524,6 +691,7 @@ impl Daemon {
             Ok(None) => (None, None),
             Err(e) => (None, Some(e.clone())),
         };
+        let trusted_locally = matches!(&*slot, Ok(Some(s)) if s.trusted_locally);
         let port = running.as_ref().map(|r| r.1).unwrap_or(settings.port());
         WebStatusView {
             enabled: settings.enabled,
@@ -532,6 +700,7 @@ impl Daemon {
             password_set: settings.password_hash.is_some(),
             urls: if running.is_some() { web::urls(&settings, port, &self.inner.name) } else { vec![] },
             fingerprint: running.map(|r| r.0),
+            trusted_locally,
             error,
         }
     }
@@ -541,20 +710,46 @@ impl Daemon {
     fn local_devices(&self) -> Result<Vec<LocalDeviceView>> {
         let inner = &self.inner;
         let (connected, resolved) = inner.export.snapshot()?;
-        let in_use = inner.server.in_use();
+        let sessions = inner.server.sessions();
         let policy = inner.export.policy();
-        let shared_view = |id: &DeviceId, access: Option<&DeviceAccess>| {
+        // Sharing state of one device: access, whether everyone may use it,
+        // who does (and since when) and who waits.
+        let shared_view = |id: &DeviceId, shared: Option<&SharedDevice>, kind: Option<DeviceKind>| {
+            let key = id.to_string();
+            let session = sessions.get(&key);
+            let queue = if shared.is_some() {
+                inner
+                    .server
+                    .queue(&key)
+                    .into_iter()
+                    .map(|(name, fingerprint)| QueueEntry { name, fingerprint })
+                    .collect()
+            } else {
+                vec![]
+            };
+            let handover = shared.map(|s| s.handover);
+            let handover_seconds = match (handover, kind) {
+                (Some(h), Some(k)) => h.idle_time(k).map(|d| d.as_secs() as u32),
+                _ => None,
+            };
             (
-                access.cloned(),
-                access.is_some_and(|a| a.is_open(policy)),
-                in_use.get(&id.to_string()).map(|u| u.0.clone()),
+                shared.map(|s| s.access.clone()),
+                shared.is_some_and(|s| s.access.is_open(policy)),
+                session.map(|s| s.client.clone()),
+                session.map(|s| s.fingerprint.clone()),
+                session.and_then(|s| s.since.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
+                queue,
+                handover,
+                handover_seconds,
             )
         };
         let mut out = vec![];
         for d in &connected {
             let entry = resolved.iter().find(|r| r.device.as_ref() == Some(d)).map(|r| &r.shared);
             let id = entry.map(|e| e.id.clone()).unwrap_or_else(|| DeviceId::of(d));
-            let (access, open_to_all, used_by) = shared_view(&id, entry.map(|e| &e.access));
+            let kind = DeviceKind::of(d);
+            let (access, open_to_all, used_by, used_by_fingerprint, used_since, queue, handover, handover_seconds) =
+                shared_view(&id, entry, Some(kind));
             out.push(LocalDeviceView {
                 id: id.to_string(),
                 busid: Some(d.info.busid.clone()),
@@ -569,12 +764,19 @@ impl Daemon {
                 access,
                 open_to_all,
                 used_by,
+                used_by_fingerprint,
+                used_since,
+                queue,
+                kind: Some(kind),
+                handover,
+                handover_seconds,
             });
         }
         for r in resolved.iter().filter(|r| r.device.is_none()) {
             let s = &r.shared;
             let (vendor_id, product_id) = s.id.ids().unwrap_or_default();
-            let (access, open_to_all, used_by) = shared_view(&s.id, Some(&s.access));
+            let (access, open_to_all, used_by, used_by_fingerprint, used_since, queue, handover, handover_seconds) =
+                shared_view(&s.id, Some(s), None);
             out.push(LocalDeviceView {
                 id: s.id.to_string(),
                 busid: None,
@@ -589,6 +791,12 @@ impl Daemon {
                 access,
                 open_to_all,
                 used_by,
+                used_by_fingerprint,
+                used_since,
+                queue,
+                kind: None,
+                handover,
+                handover_seconds,
             });
         }
         Ok(out)
@@ -604,15 +812,31 @@ impl Daemon {
     async fn dispatch(&self, req: Request) -> Result<Response> {
         let inner = &self.inner;
         Ok(match req {
-            Request::Status => ok(StatusView {
-                name: inner.name.clone(),
-                fingerprint: inner.fingerprint.clone(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                listen: inner.listen.clone(),
-                pairing: inner.server.pairing().map(|(pin, left)| PairingView { pin, remaining_secs: left.as_secs() }),
-                policy: inner.export.policy(),
-                policy_chosen: inner.config.lock().unwrap().policy.is_some(),
-            }),
+            Request::Status => {
+                // One lock: a guard taken inside the struct expression lives
+                // until its end, so locking twice there would deadlock.
+                let (roles, policy_chosen) = {
+                    let config = inner.config.lock().unwrap();
+                    (config.roles.unwrap_or_default(), config.policy.is_some())
+                };
+                let check = inner.setup_check.lock().unwrap().clone();
+                let setup_issues = check.map(|c| c(roles)).unwrap_or_default();
+                ok(StatusView {
+                    name: inner.name.clone(),
+                    roles,
+                    reboot_required: inner.reboot_required.load(std::sync::atomic::Ordering::Relaxed),
+                    setup_issues,
+                    fingerprint: inner.fingerprint.clone(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    listen: inner.listen.clone(),
+                    pairing: inner
+                        .server
+                        .pairing()
+                        .map(|(pin, left)| PairingView { pin, remaining_secs: left.as_secs() }),
+                    policy: inner.export.policy(),
+                    policy_chosen,
+                })
+            }
             Request::LocalDevices => ok(self.local_devices()?),
             Request::SetShared { device, shared } => {
                 if inner.export.set_shared(&device, shared)? {
@@ -793,6 +1017,20 @@ impl Daemon {
                 ok(())
             }
             Request::WebStatus => ok(self.web_status().await),
+            Request::Disconnect { device } => {
+                let wanted = DeviceId::parse(&device);
+                let n = inner.server.disconnect(|id, _| DeviceId::parse(id) == wanted);
+                ok(serde_json::json!({ "disconnected": n }))
+            }
+            Request::SetDeviceHandover { device, mode, seconds } => {
+                inner.export.set_handover(&device, Handover { mode, seconds })?;
+                self.shares_changed()?;
+                ok(())
+            }
+            Request::SetRoles { server, client } => {
+                let reboot_required = self.set_roles(Roles { server, client }).await?;
+                ok(serde_json::json!({ "reboot_required": reboot_required }))
+            }
             Request::WebConfigure { enabled, lan, port, password } => {
                 let hash = match password {
                     Some(p) => Some(tokio::task::spawn_blocking(move || web::hash_password(&p)).await??),
@@ -822,5 +1060,49 @@ impl Daemon {
                 ok(self.web_status().await)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installer_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(saved_roles(dir.path()), Roles { server: true, client: true }, "both by default");
+
+        // Other settings survive.
+        let config = Config { usage_retention_days: 30, ..Config::default() };
+        write_config(&path, &config).unwrap();
+
+        let client_only = Roles { server: false, client: true };
+        apply_setup(dir.path(), Setup { roles: Some(client_only), ..Setup::default() }).unwrap();
+        assert_eq!(saved_roles(dir.path()), client_only);
+        assert_eq!(read_config(&path).unwrap().usage_retention_days, 30);
+
+        // The web interface needs a password.
+        let enable = || Setup { web_enabled: Some(true), web_lan: Some(false), ..Setup::default() };
+        let e = apply_setup(dir.path(), enable()).unwrap_err();
+        assert_eq!(ApiError::from_anyhow(&e).code, "password_required");
+        let short = Setup { web_password: Some("short".into()), ..enable() };
+        assert_eq!(ApiError::from_anyhow(&apply_setup(dir.path(), short).unwrap_err()).code, "weak_password");
+        let first = Setup { web_password: Some("correct horse".into()), web_port: Some(4000), ..enable() };
+        apply_setup(dir.path(), first).unwrap();
+        let web = saved_web(dir.path());
+        assert!(web.enabled && !web.lan);
+        assert_eq!(web.port(), 4000);
+        let hash = web.password_hash.clone().unwrap();
+
+        // An upgrade without a new password keeps the old one.
+        apply_setup(dir.path(), Setup { web_lan: Some(true), ..enable() }).unwrap();
+        let web = saved_web(dir.path());
+        assert!(web.enabled && web.lan);
+        assert_eq!(web.password_hash, Some(hash));
+
+        apply_setup(dir.path(), Setup { web_enabled: Some(false), ..Setup::default() }).unwrap();
+        assert!(!saved_web(dir.path()).enabled);
+        assert_eq!(saved_roles(dir.path()), client_only, "roles untouched");
     }
 }

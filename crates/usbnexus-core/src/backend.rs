@@ -18,6 +18,7 @@ use usbnexus_proto::DeviceInfo;
 
 use crate::access::{DeviceAccess, Policy};
 use crate::device_id::DeviceId;
+use crate::handover::{DeviceKind, Handover};
 
 /// A local USB device that can be exported.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +63,9 @@ pub struct Offered {
     pub product: Option<String>,
     pub manufacturer: Option<String>,
     pub allowed: Allowed,
+    /// Idle time after which the device goes to the next waiting computer
+    /// (see [`crate::handover`]); `None`: it stays with its user.
+    pub handover: Option<std::time::Duration>,
 }
 
 impl Offered {
@@ -112,11 +116,19 @@ pub struct SharedDevice {
     pub manufacturer: Option<String>,
     #[serde(default)]
     pub access: DeviceAccess,
+    #[serde(default, skip_serializing_if = "Handover::is_default")]
+    pub handover: Handover,
 }
 
 impl SharedDevice {
     pub fn new(id: DeviceId) -> Self {
-        SharedDevice { id, product: None, manufacturer: None, access: DeviceAccess::default() }
+        SharedDevice {
+            id,
+            product: None,
+            manufacturer: None,
+            access: DeviceAccess::default(),
+            handover: Handover::default(),
+        }
     }
 }
 
@@ -133,6 +145,8 @@ enum SharedRepr {
         manufacturer: Option<String>,
         #[serde(default)]
         access: DeviceAccess,
+        #[serde(default)]
+        handover: Handover,
     },
 }
 
@@ -140,8 +154,8 @@ impl From<SharedRepr> for SharedDevice {
     fn from(r: SharedRepr) -> Self {
         match r {
             SharedRepr::Busid(b) => SharedDevice::new(DeviceId::parse(&b)),
-            SharedRepr::Full { id, product, manufacturer, access } => {
-                SharedDevice { id, product, manufacturer, access }
+            SharedRepr::Full { id, product, manufacturer, access, handover } => {
+                SharedDevice { id, product, manufacturer, access, handover }
             }
         }
     }
@@ -175,8 +189,15 @@ pub fn resolve(shared: &[SharedDevice], connected: &[LocalDevice]) -> Vec<Resolv
 /// when it is unplugged and plugged in again, on any port if it has a
 /// serial number. The set can change while the server runs.
 pub struct SharedExport {
-    host: Arc<dyn DeviceHost>,
+    /// Replaced when the computer's roles change.
+    host: std::sync::RwLock<Arc<dyn DeviceHost>>,
     state: Mutex<ShareState>,
+    /// Devices seen by the last listing. Listing can block for a long time
+    /// (on Windows it asks every hub for descriptors), so only
+    /// [`SharedExport::refresh`], which the service runs on a blocking
+    /// thread, lists devices; everything else, often called from async
+    /// code, uses this copy.
+    connected: Mutex<Option<Vec<LocalDevice>>>,
 }
 
 struct ShareState {
@@ -193,11 +214,32 @@ fn not_shared(what: &str) -> anyhow::Error {
 impl SharedExport {
     pub fn new(host: Arc<dyn DeviceHost>, shared: impl IntoIterator<Item = SharedDevice>, policy: Policy) -> Self {
         let state = ShareState { shared: shared.into_iter().collect(), policy, ports: HashMap::new() };
-        SharedExport { host, state: Mutex::new(state) }
+        SharedExport { host: std::sync::RwLock::new(host), state: Mutex::new(state), connected: Mutex::new(None) }
     }
 
-    pub fn host(&self) -> &Arc<dyn DeviceHost> {
-        &self.host
+    /// Devices of the last listing; lists them now if there was none yet.
+    fn connected(&self) -> Result<Vec<LocalDevice>> {
+        if let Some(list) = &*self.connected.lock().unwrap() {
+            return Ok(list.clone());
+        }
+        self.list_now()
+    }
+
+    fn list_now(&self) -> Result<Vec<LocalDevice>> {
+        let list = self.host().list_all()?;
+        *self.connected.lock().unwrap() = Some(list.clone());
+        Ok(list)
+    }
+
+    pub fn host(&self) -> Arc<dyn DeviceHost> {
+        self.host.read().unwrap().clone()
+    }
+
+    /// Switches to another host (roles changed). Until the next
+    /// [`SharedExport::refresh`] no devices are listed.
+    pub fn set_host(&self, host: Arc<dyn DeviceHost>) {
+        *self.host.write().unwrap() = host;
+        *self.connected.lock().unwrap() = Some(vec![]);
     }
 
     /// The shared devices, in the order they were shared.
@@ -215,7 +257,7 @@ impl SharedExport {
 
     /// Every connected device, and the shared devices matched against them.
     pub fn snapshot(&self) -> Result<(Vec<LocalDevice>, Vec<Resolved>)> {
-        let connected = self.host.list_all()?;
+        let connected = self.connected()?;
         let resolved = resolve(&self.shared(), &connected);
         Ok((connected, resolved))
     }
@@ -226,7 +268,7 @@ impl SharedExport {
     /// keep reserving them. Returns whether anything changed (and should be
     /// saved).
     pub fn refresh(&self) -> Result<bool> {
-        let connected = self.host.list_all()?;
+        let connected = self.list_now()?;
         let mut st = self.state.lock().unwrap();
         let resolved = resolve(&st.shared, &connected);
         let mut changed = false;
@@ -263,7 +305,7 @@ impl SharedExport {
         st.ports = ports;
         drop(st);
         for busid in left {
-            if let Err(e) = self.host.release(&busid) {
+            if let Err(e) = self.host().release(&busid) {
                 tracing::debug!(busid, "could not release a port: {e:#}");
             }
         }
@@ -285,7 +327,7 @@ impl SharedExport {
     /// no longer shared is handed back to its normal driver.
     pub fn set_shared(&self, device: &str, shared: bool) -> Result<bool> {
         let wanted = DeviceId::parse(device);
-        let connected = self.host.list_all()?;
+        let connected = self.connected()?;
         let mut st = self.state.lock().unwrap();
         let index = Self::find(&st.shared, &connected, &wanted);
         if shared {
@@ -295,10 +337,9 @@ impl SharedExport {
             let present = connected.iter().find(|d| wanted.matches(d));
             let entry = match present {
                 Some(d) => SharedDevice {
-                    id: DeviceId::of(d),
                     product: d.product.clone(),
                     manufacturer: d.manufacturer.clone(),
-                    access: DeviceAccess::default(),
+                    ..SharedDevice::new(DeviceId::of(d))
                 },
                 // Not plugged in: shared as soon as it appears.
                 None => SharedDevice::new(wanted),
@@ -314,15 +355,25 @@ impl SharedExport {
         st.shared.remove(index);
         drop(st);
         if let Some(d) = &before[index].device {
-            self.host.release(&d.info.busid)?;
+            self.host().release(&d.info.busid)?;
         }
         Ok(true)
+    }
+
+    /// Changes the automatic handover setting of a shared device.
+    pub fn set_handover(&self, device: &str, handover: Handover) -> Result<()> {
+        let wanted = DeviceId::parse(device);
+        let connected = if wanted.is_legacy() { self.connected()? } else { vec![] };
+        let mut st = self.state.lock().unwrap();
+        let i = Self::find(&st.shared, &connected, &wanted).ok_or_else(|| not_shared(device))?;
+        st.shared[i].handover = handover;
+        Ok(())
     }
 
     /// Changes who may use a shared device.
     pub fn set_access(&self, device: &str, access: DeviceAccess) -> Result<()> {
         let wanted = DeviceId::parse(device);
-        let connected = if wanted.is_legacy() { self.host.list_all()? } else { vec![] };
+        let connected = if wanted.is_legacy() { self.connected()? } else { vec![] };
         let mut st = self.state.lock().unwrap();
         let i = Self::find(&st.shared, &connected, &wanted).ok_or_else(|| not_shared(device))?;
         st.shared[i].access = access;
@@ -332,7 +383,7 @@ impl SharedExport {
     /// Lets the computer `fingerprint` use exactly the devices in `devices`
     /// (among those whose access is limited to a list).
     pub fn set_client_devices(&self, fingerprint: &str, devices: &[String]) -> Result<()> {
-        let connected = self.host.list_all()?;
+        let connected = self.connected()?;
         let mut st = self.state.lock().unwrap();
         let mut chosen = BTreeSet::new();
         for d in devices {
@@ -368,6 +419,7 @@ impl SharedExport {
                 } else {
                     Allowed::Only(r.shared.access.allowed.clone())
                 },
+                handover: r.device.as_ref().and_then(|d| r.shared.handover.idle_time(DeviceKind::of(d))),
                 product: r.device.as_ref().and_then(|d| d.product.clone()).or(r.shared.product),
                 manufacturer: r.device.as_ref().and_then(|d| d.manufacturer.clone()).or(r.shared.manufacturer),
                 id: r.shared.id,
@@ -387,7 +439,10 @@ impl ExportBackend for SharedExport {
         let shared =
             self.snapshot().map(|(_, r)| r.iter().any(|r| r.device.as_ref().is_some_and(|d| d.info.busid == busid)));
         match shared {
-            Ok(true) => self.host.export(busid),
+            Ok(true) => {
+                let host = self.host();
+                Box::pin(async move { host.export(busid).await })
+            }
             Ok(false) => Box::pin(async move { Err(not_shared(busid)) }),
             Err(e) => Box::pin(async move { Err(e) }),
         }
@@ -405,6 +460,24 @@ impl DeviceHost for UnsupportedHost {
 
     fn export<'a>(&'a self, _busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
         Box::pin(async move { self.list_all().map(|_| unreachable!()) })
+    }
+
+    fn release(&self, _busid: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Host for a computer not set up to share its devices: lists none and
+/// never touches USB devices.
+pub struct NoHost;
+
+impl DeviceHost for NoHost {
+    fn list_all(&self) -> Result<Vec<LocalDevice>> {
+        Ok(vec![])
+    }
+
+    fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
+        Box::pin(async move { Err(not_shared(busid)) })
     }
 
     fn release(&self, _busid: &str) -> Result<()> {
@@ -527,6 +600,43 @@ mod tests {
         assert!(!export.refresh().unwrap(), "nothing left to migrate");
     }
 
+    /// Counts how often devices are listed.
+    #[derive(Default)]
+    struct CountingHost(std::sync::atomic::AtomicUsize);
+
+    impl DeviceHost for CountingHost {
+        fn list_all(&self) -> Result<Vec<LocalDevice>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            DemoHost.list_all()
+        }
+        fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
+            Box::pin(async move { anyhow::bail!("not exporting {busid}") })
+        }
+        fn release(&self, _busid: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Listing can block (Windows asks every hub, including the virtual one
+    /// whose answers travel through this very service), so only `refresh`
+    /// lists devices; requests use the last listing.
+    #[test]
+    fn only_refresh_lists_devices() {
+        let host = Arc::new(CountingHost::default());
+        let export = SharedExport::new(host.clone(), [], Policy::Open);
+        let listings = || host.0.load(std::sync::atomic::Ordering::SeqCst);
+        export.refresh().unwrap();
+        assert_eq!(listings(), 1);
+        assert!(export.set_shared("1-1", true).unwrap());
+        export.set_access(STICK, DeviceAccess::default()).unwrap();
+        export.set_client_devices("fp", &[STICK.to_string()]).unwrap();
+        export.snapshot().unwrap();
+        export.list().unwrap();
+        assert_eq!(listings(), 1, "requests reuse the last listing");
+        export.refresh().unwrap();
+        assert_eq!(listings(), 2);
+    }
+
     #[test]
     fn loopback_pair_is_connected() {
         let (mut a, mut b) = super::loopback_pair().unwrap();
@@ -570,7 +680,15 @@ pub mod demo {
                 device_protocol: 0,
                 configuration_value: 1,
                 num_configurations: 1,
-                interfaces: vec![InterfaceInfo::default()],
+                // Class by product: storage, HID (receiver), smart card reader.
+                interfaces: vec![InterfaceInfo {
+                    class: match product {
+                        "USB Receiver" => 0x03,
+                        "Smart Card Reader" => 0x0b,
+                        _ => 0x08,
+                    },
+                    ..InterfaceInfo::default()
+                }],
             },
             product: Some(product.into()),
             manufacturer: Some(mfr.into()),

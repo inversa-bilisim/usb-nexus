@@ -106,6 +106,40 @@ async fn share_pair_attach_restore_detach() {
     let remote: Vec<RemoteDeviceView> = call(&b, Request::RemoteDevices { server: server_fp.clone() }).await;
     assert!(remote[0].in_use && remote[0].attached_here);
 
+    // Details for the dialog: who, since when, kind, handover setting.
+    let dev = local.iter().find(|d| d.id == id).unwrap().clone();
+    assert_eq!(dev.used_by_fingerprint.as_deref(), Some(peers_a.clients[0].fingerprint.as_str()));
+    assert!(dev.used_since.is_some_and(|t| t > 0));
+    assert!(dev.queue.is_empty());
+    assert_eq!(dev.kind, Some(usbnexus_core::handover::DeviceKind::Storage));
+    assert_eq!(dev.handover_seconds, None, "storage: no automatic handover by default");
+    let _: () = call(
+        &a,
+        Request::SetDeviceHandover {
+            device: id.clone(),
+            mode: usbnexus_core::handover::HandoverMode::On,
+            seconds: Some(5),
+        },
+    )
+    .await;
+    let local: Vec<LocalDeviceView> = call(&a, Request::LocalDevices).await;
+    assert_eq!(local.iter().find(|d| d.id == id).unwrap().handover_seconds, Some(5));
+
+    // "Disconnect" ends the use; the client comes back by itself.
+    let since = dev.used_since.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let r: serde_json::Value = call(&a, Request::Disconnect { device: id.clone() }).await;
+    assert_eq!(r["disconnected"], 1);
+    let again = loop {
+        let local: Vec<LocalDeviceView> = call(&a, Request::LocalDevices).await;
+        let d = local.iter().find(|d| d.id == id).unwrap().clone();
+        if d.used_since.is_some_and(|t| t > since) {
+            break d;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(again.used_by.as_deref(), Some("laptop"));
+
     // Restarting B restores the attachment from its saved configuration.
     b.daemon.shutdown();
     drop(b);
@@ -147,4 +181,42 @@ async fn attach_requires_pairing_and_bad_requests_are_rejected() {
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).await.unwrap();
     assert!(line.contains("\"invalid\""), "{line}");
+}
+
+#[tokio::test]
+async fn roles_switch_backends() {
+    use usbnexus_core::api::{ApiError, Roles};
+    use usbnexus_core::backend::{DeviceHost, NoHost};
+
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "roles").await;
+    let status: StatusView = call(&n, Request::Status).await;
+    assert_eq!(status.roles, Roles { server: true, client: true });
+    assert!(!status.reboot_required);
+    assert!(!call::<Vec<LocalDeviceView>>(&n, Request::LocalDevices).await.is_empty());
+
+    // What the service does on Windows: a sharing-free host for a client,
+    // and (here) a restart needed after dropping the server role.
+    n.daemon.set_backend_factory(Arc::new(|roles: Roles| {
+        let host: Arc<dyn DeviceHost> = if roles.server { Arc::new(DemoHost) } else { Arc::new(NoHost) };
+        Ok((host, Arc::new(DemoImport::default()) as _, !roles.server))
+    }));
+    let r: serde_json::Value = call(&n, Request::SetRoles { server: false, client: true }).await;
+    assert_eq!(r["reboot_required"], true);
+    assert!(
+        call::<Vec<LocalDeviceView>>(&n, Request::LocalDevices).await.is_empty(),
+        "no devices without the server role"
+    );
+    let status: StatusView = call(&n, Request::Status).await;
+    assert_eq!(status.roles, Roles { server: false, client: true });
+    assert!(status.reboot_required);
+
+    let e = api::call::<serde_json::Value>(&n.socket, &Request::SetRoles { server: false, client: false })
+        .await
+        .unwrap_err();
+    assert_eq!(e.downcast_ref::<ApiError>().map(|e| e.code.as_str()), Some("invalid"));
+
+    call::<serde_json::Value>(&n, Request::SetRoles { server: true, client: true }).await;
+    assert!(!call::<Vec<LocalDeviceView>>(&n, Request::LocalDevices).await.is_empty());
+    assert_eq!(usbnexus_core::daemon::saved_roles(dir.path()), Roles { server: true, client: true });
 }

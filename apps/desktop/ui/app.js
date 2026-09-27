@@ -41,6 +41,7 @@ async function loadStrings(lang) {
   state.languages = s.languages;
   state.messages = s.messages;
   document.documentElement.lang = s.lang;
+  if (!window.USBNEXUS_WEB) invoke("set_language", { lang: s.lang }).catch(() => {});
 }
 
 function errorText(err) {
@@ -149,9 +150,10 @@ async function api(cmd, args = {}) {
     }
     return data;
   } catch (err) {
-    if (err && err.code === "service_unavailable") {
-      if (!state.serviceDown) {
+    if (err && (err.code === "service_unavailable" || err.code === "permission_denied")) {
+      if (!state.serviceDown || state.serviceDownReason !== err.code) {
         state.serviceDown = true;
+        state.serviceDownReason = err.code;
         render();
       }
       throw new ServiceDown(err.message);
@@ -171,9 +173,9 @@ async function act(fn) {
 
 // ---------------------------------------------------------------- modal
 
-function openModal(content, { onClose } = {}) {
+function openModal(content, { onClose, wide = false } = {}) {
   const backdrop = document.getElementById("modal");
-  const box = h("div", { class: "modal", role: "dialog", "aria-modal": "true" }, content);
+  const box = h("div", { class: "modal" + (wide ? " wide" : ""), role: "dialog", "aria-modal": "true" }, content);
   backdrop.replaceChildren(box);
   backdrop.hidden = false;
   const close = () => {
@@ -204,11 +206,22 @@ const VIEWS = [
   ["settings", "settings", "gui-nav-settings"],
 ];
 
+/** What this computer is set up for (both until the service says). */
+function roles() {
+  return (state.status && state.status.roles) || { server: true, client: true };
+}
+
+/** Views of the roles this computer has; the others are not shown at all. */
+function visibleViews() {
+  const r = roles();
+  return VIEWS.filter(([id]) => (id !== "this" || r.server) && ((id !== "network" && id !== "connected") || r.client));
+}
+
 function renderSidebar() {
   const nav = document.getElementById("nav");
   nav.setAttribute("aria-label", t("gui-nav-this-computer"));
   nav.replaceChildren(
-    ...VIEWS.map(([id, ic, key]) =>
+    ...visibleViews().map(([id, ic, key]) =>
       h(
         "button",
         {
@@ -304,27 +317,35 @@ async function pageThis() {
           toggle.disabled = true;
           await api("set_shared", { device: d.id, shared: !d.shared });
           await refresh();
+          if (!d.shared) await askWhoMayUse(d.id);
         }),
     });
+    toggle.addEventListener("click", (e) => e.stopPropagation());
     let badge;
-    if (d.used_by) badge = h("span", { class: "badge accent" }, t("gui-used-by", { name: d.used_by }));
-    else if (!d.present) badge = h("span", { class: "badge warn" }, t("gui-not-plugged-in"));
+    if (d.used_by) {
+      const waiting = (d.queue || []).length;
+      const text = waiting
+        ? t("gui-used-by-waiting", { name: d.used_by, count: waiting })
+        : t("gui-used-by", { name: d.used_by });
+      badge = h("span", { class: "badge accent" }, text);
+    } else if (!d.present) badge = h("span", { class: "badge warn" }, t("gui-not-plugged-in"));
     else if (d.shared) badge = h("span", { class: "badge ok" }, t("gui-shared"));
     else badge = h("span", { class: "badge" }, t("gui-not-shared"));
-    const access = d.shared
-      ? h(
-          "button",
-          { class: "btn ghost small", title: t("gui-access-title"), onclick: () => act(() => accessDialog(d)) },
-          icon("shield"),
-          accessLabel(d),
-        )
-      : null;
+    // Shared devices open their details (use, queue, handover, access).
+    const access = d.shared ? h("span", { class: "muted small-text" }, icon("shield"), " ", accessLabel(d)) : null;
+    const open = () => act(() => deviceDialog(d.id));
     return h(
       "div",
-      { class: "row" + (d.present ? "" : " absent") },
+      {
+        class: "row" + (d.present ? "" : " absent") + (d.shared ? " clickable" : ""),
+        role: d.shared ? "button" : null,
+        tabindex: d.shared ? "0" : null,
+        onclick: d.shared ? open : null,
+        onkeydown: d.shared ? (e) => e.key === "Enter" && open() : null,
+      },
       h("div", { class: "tile" + (d.shared && d.present ? " on" : "") }, icon("usb")),
       h("div", { class: "row-body" }, h("div", { class: "row-title" }, deviceName(d)), deviceMeta(d)),
-      h("div", { class: "row-end" }, access, badge, toggle),
+      h("div", { class: "row-end" }, access, badge, toggle, d.shared ? icon("chevron") : null),
     );
   });
   return [
@@ -592,6 +613,8 @@ function attachBadge(a) {
       return a.error && a.error.code === "access_denied"
         ? h("span", { class: "badge danger" }, t("gui-no-permission"))
         : h("span", { class: "badge busy warn" }, t("gui-state-waiting-device"));
+    case "queued":
+      return h("span", { class: "badge busy warn" }, t("gui-state-queued", { position: a.position }));
     case "stopped":
       return h("span", { class: "badge" }, t("gui-state-stopped"));
     default:
@@ -680,10 +703,15 @@ async function pagePaired() {
       t("gui-paired-empty"),
     ),
   ];
+  const r = roles();
   return [
-    pageHead(t("gui-paired-title"), t("gui-paired-subtitle")),
-    ...section(t("gui-paired-servers"), peers.servers),
-    ...section(t("gui-paired-clients"), peers.clients, true),
+    pageHead(
+      t("gui-paired-title"),
+      t("gui-paired-subtitle"),
+      r.server ? h("button", { class: "btn primary", onclick: () => act(showPin) }, icon("plus"), t("gui-pair-new")) : null,
+    ),
+    ...(r.client ? section(t("gui-paired-servers"), peers.servers) : []),
+    ...(r.server ? section(t("gui-paired-clients"), peers.clients, true) : []),
   ];
 }
 
@@ -728,27 +756,122 @@ function checkedValue(form, name) {
   return el ? el.value : null;
 }
 
-// Who may use one shared device.
-async function accessDialog(d) {
-  const [peers, status] = [await api("peers"), await api("status")];
+// Right after sharing: if no computer may use the device yet (restricted
+// policy, empty list), ask which ones may, as long as there is a choice.
+async function askWhoMayUse(id) {
+  const shared = (await api("local_devices")).find((x) => x.id === id);
+  if (!shared || !shared.shared || shared.open_to_all) return;
+  if (shared.access && shared.access.allowed && shared.access.allowed.length) return;
+  if (!(await api("peers")).clients.length) return;
+  await deviceDialog(id);
+}
+
+// Details of one shared device: who uses it and who waits (with
+// "disconnect"), automatic handover, and who may use it. `id` is looked up
+// again so the dialog shows the current state.
+async function deviceDialog(id) {
+  const [devices, peers, status] = [await api("local_devices"), await api("peers"), await api("status")];
+  const d = devices.find((x) => x.id === id);
+  if (!d || !d.shared) return;
   const access = d.access || { mode: "default", allowed: [] };
   const allowed = new Set(access.allowed || []);
+  const queuePos = new Map((d.queue || []).map((q, i) => [q.fingerprint, i + 1]));
+
+  // --- permissions column
   const defaultText = status.policy === "open" ? t("gui-access-default-open") : t("gui-access-default-restricted");
-  const boxes = peers.clients.map((p) =>
-    h(
+  const boxes = peers.clients.map((p) => {
+    let mark = null;
+    if (d.used_by_fingerprint === p.fingerprint) mark = h("span", { class: "badge accent" }, t("gui-badge-using"));
+    else if (queuePos.has(p.fingerprint))
+      mark = h("span", { class: "badge" }, t("gui-badge-queued", { position: queuePos.get(p.fingerprint) }));
+    return h(
       "label",
       { class: "check" },
       h("input", { type: "checkbox", value: p.fingerprint, checked: allowed.has(p.fingerprint) }),
       h("span", {}, p.name),
-      h("span", { class: "mono muted" }, shortFp(p.fingerprint)),
-    ),
-  );
+      mark,
+    );
+  });
   const listBox = h(
     "div",
     { class: "checks" },
     h("div", { class: "checks-title" }, t("gui-access-computers")),
     boxes.length ? boxes : h("div", { class: "muted" }, t("gui-paired-empty")),
   );
+  const permissions = h(
+    "div",
+    {},
+    h("div", { class: "col-title" }, t("gui-col-permissions")),
+    h("div", { class: "detail-section" }, t("gui-access-title")),
+    h(
+      "div",
+      { class: "choices" },
+      choice("mode", "default", access.mode === "default", t("gui-access-mode-default"), defaultText),
+      choice("mode", "open", access.mode === "open", t("gui-access-mode-open"), t("gui-access-mode-open-body")),
+      choice("mode", "selected", access.mode === "selected", t("gui-access-mode-selected"), t("gui-access-mode-selected-body")),
+    ),
+    listBox,
+    h("p", { class: "note muted" }, t("gui-access-revoke-note")),
+  );
+
+  // --- status column
+  const disconnect = h("button", { class: "btn small danger", type: "button" }, t("gui-disconnect-user"));
+  // The client asks for the device again by itself, so the dialog stays
+  // open and says how to keep it away for good (untick it on the left).
+  disconnect.onclick = () =>
+    act(async () => {
+      disconnect.disabled = true;
+      await api("disconnect", { device: d.id });
+      user.replaceChildren(h("span", { class: "note" }, t("gui-disconnected-note", { name: d.used_by })));
+      refresh();
+    });
+  const user = d.used_by
+    ? h(
+        "div",
+        { class: "user-line" },
+        h("span", {}, h("strong", {}, d.used_by), h("br"), h("span", { class: "muted" }, d.used_since ? t("gui-since", { time: formatTime(d.used_since) }) : "")),
+        disconnect,
+      )
+    : h("div", { class: "user-line" }, h("span", { class: "muted" }, t("gui-nobody-using")));
+  const queue = (d.queue || []).length
+    ? h("ol", { class: "queue" }, (d.queue || []).map((q) => h("li", {}, q.name)))
+    : h("p", { class: "muted note" }, t("gui-queue-empty"));
+
+  const defaultOn = d.kind === "dongle" || d.kind === "printer";
+  const handover = d.handover || { mode: "default", seconds: null };
+  const defaultLabel = defaultOn
+    ? t("gui-handover-default-on", { seconds: 30 })
+    : t("gui-handover-default-off");
+  const modeSel = h(
+    "select",
+    {},
+    h("option", { value: "default", selected: handover.mode === "default" }, defaultLabel),
+    h("option", { value: "on", selected: handover.mode === "on" }, t("gui-handover-on")),
+    h("option", { value: "off", selected: handover.mode === "off" }, t("gui-handover-off")),
+  );
+  const seconds = h("input", { type: "number", min: "1", max: "3600", value: String(handover.seconds || 30) });
+  const updateHandover = () => {
+    seconds.disabled = modeSel.value !== "on";
+  };
+  modeSel.onchange = updateHandover;
+  updateHandover();
+  const statusCol = h(
+    "div",
+    {},
+    h("div", { class: "col-title" }, t("gui-col-status")),
+    h("div", { class: "detail-section" }, t("gui-in-use-title")),
+    user,
+    h("div", { class: "detail-section" }, t("gui-queue-title", { count: (d.queue || []).length })),
+    queue,
+    h("div", { class: "detail-section" }, t("gui-handover-title")),
+    h(
+      "div",
+      { class: "handover" },
+      modeSel,
+      h("div", { class: "row2" }, h("span", { class: "muted" }, t("gui-handover-before")), seconds, h("span", { class: "muted" }, t("gui-handover-after"))),
+    ),
+  );
+
   const errorEl = h("div", { class: "form-error", role: "alert" });
   const form = h(
     "form",
@@ -763,6 +886,10 @@ async function accessDialog(d) {
             mode: checkedValue(form, "mode"),
             allowed: [...form.querySelectorAll(".checks input:checked")].map((i) => i.value),
           });
+          const mode = modeSel.value;
+          if (mode !== handover.mode || (mode === "on" && Number(seconds.value) !== (handover.seconds || 30))) {
+            await api("set_device_handover", { device: d.id, mode, seconds: mode === "on" ? Number(seconds.value) : null });
+          }
           close();
           refresh();
         } catch (err) {
@@ -770,17 +897,9 @@ async function accessDialog(d) {
         }
       },
     },
-    h("h2", {}, t("gui-access-title")),
-    h("p", {}, deviceName(d)),
-    h(
-      "div",
-      { class: "choices" },
-      choice("mode", "default", access.mode === "default", t("gui-access-mode-default"), defaultText),
-      choice("mode", "open", access.mode === "open", t("gui-access-mode-open"), t("gui-access-mode-open-body")),
-      choice("mode", "selected", access.mode === "selected", t("gui-access-mode-selected"), t("gui-access-mode-selected-body")),
-    ),
-    listBox,
-    h("p", { class: "note" }, t("gui-access-revoke-note")),
+    h("h2", {}, deviceName(d)),
+    h("div", { class: "meta-line" }, deviceMeta(d, d.kind ? [h("span", {}, t("gui-kind-" + d.kind))] : [])),
+    h("div", { class: "cols" }, permissions, statusCol),
     errorEl,
     h(
       "div",
@@ -794,7 +913,7 @@ async function accessDialog(d) {
     listBox.hidden = mode === "open" || (mode === "default" && status.policy === "open");
   };
   update();
-  const close = openModal(form);
+  const close = openModal(form, { wide: true });
 }
 
 // Which shared devices one computer may use (also shown right after pairing
@@ -1038,10 +1157,198 @@ async function pageSettings() {
     h("label", { class: "field" }, t("gui-retention-days"), days),
     h("div", { class: "modal-actions" }, h("button", { class: "btn primary", type: "submit" }, t("gui-save"))),
   );
-  return [pageHead(t("gui-settings-title"), null), policyForm, retentionForm];
+  const r = status.roles || { server: true, client: true };
+  const web = await webCard();
+  const startup = await startupCard();
+  return [pageHead(t("gui-settings-title"), null), rolesForm(r), web, startup, r.server ? policyForm : null, retentionForm];
+}
+
+// Desktop app only: start when the user signs in (the window closes into
+// the notification area).
+async function startupCard() {
+  if (window.USBNEXUS_WEB) return null;
+  let enabled;
+  try {
+    enabled = await invoke("autostart_get");
+  } catch {
+    return null;
+  }
+  if (enabled === null || enabled === undefined) return null;
+  const box = h("input", { type: "checkbox", checked: enabled });
+  box.addEventListener("change", () =>
+    act(async () => {
+      try {
+        await invoke("autostart_set", { enabled: box.checked });
+        toast(t("gui-saved"));
+      } catch (err) {
+        box.checked = !box.checked;
+        throw err;
+      }
+    }),
+  );
+  return h(
+    "div",
+    { class: "card" },
+    h("h2", {}, t("gui-startup-title")),
+    h("p", {}, t("gui-startup-body")),
+    h("div", { class: "checks" }, h("label", { class: "check" }, box, h("span", {}, t("gui-startup-enabled")))),
+  );
+}
+
+// The web interface: on/off, reachable from this computer only or the whole
+// network, port and password. Changeable in the app only (the web interface
+// cannot reconfigure itself).
+async function webCard() {
+  const w = await api("web_status");
+  const info = h(
+    "div",
+    {},
+    w.enabled && w.urls.length
+      ? h("p", {}, t("gui-web-open-at"), " ", ...w.urls.flatMap((u, i) => [i ? ", " : null, h("code", {}, u)]))
+      : null,
+    w.enabled && w.fingerprint
+      ? h("p", { class: "note muted" }, t(w.trusted_locally ? "gui-web-trusted" : "gui-web-fingerprint", { fp: w.fingerprint }))
+      : null,
+    w.enabled && w.error ? h("p", { class: "form-error" }, w.error) : null,
+  );
+  if (state.os === "web") {
+    return h("div", { class: "card" }, h("h2", {}, t("gui-web-title")), h("p", {}, t("gui-web-local-only-note")), info);
+  }
+  const enabled = h("input", { type: "checkbox", checked: w.enabled });
+  const local = h("input", { type: "radio", name: "web-access", value: "local", checked: !w.lan });
+  const network = h("input", { type: "radio", name: "web-access", value: "network", checked: w.lan });
+  const port = h("input", { type: "number", min: "1", max: "65535", value: String(w.port), required: true });
+  const pw1 = h("input", { type: "password", autocomplete: "new-password", placeholder: w.password_set ? "" : "" });
+  const pw2 = h("input", { type: "password", autocomplete: "new-password" });
+  const errorEl = h("div", { class: "form-error", role: "alert" });
+  const fields = h(
+    "div",
+    { class: "web-fields" },
+    h("div", { class: "checks" }, h("label", { class: "check" }, local, h("span", {}, t("gui-web-access-local"))), h("label", { class: "check" }, network, h("span", {}, t("gui-web-access-network")))),
+    h("label", { class: "field" }, t("gui-web-port"), port),
+    h("label", { class: "field" }, t("gui-web-new-password"), pw1),
+    h("label", { class: "field" }, t("gui-web-repeat-password"), pw2),
+    h("p", { class: "note muted" }, w.password_set ? t("gui-web-password-keep") : t("gui-web-password-required")),
+  );
+  const updateFields = () => {
+    fields.hidden = !enabled.checked;
+  };
+  enabled.addEventListener("change", updateFields);
+  updateFields();
+  const form = h(
+    "form",
+    {
+      class: "card",
+      onsubmit: (e) => {
+        e.preventDefault();
+        errorEl.textContent = "";
+        act(async () => {
+          if (pw1.value !== pw2.value) {
+            errorEl.textContent = t("gui-web-mismatch");
+            return;
+          }
+          const args = { enabled: enabled.checked, lan: network.checked, port: Number(port.value) };
+          if (pw1.value) args.password = pw1.value;
+          try {
+            await api("web_configure", args);
+          } catch (err) {
+            if (!(err instanceof ServiceDown)) errorEl.textContent = errorText(err);
+            return;
+          }
+          toast(t("gui-saved"));
+          await render();
+        });
+      },
+    },
+    h("h2", {}, t("gui-web-title")),
+    h("p", {}, t("gui-web-body")),
+    h("div", { class: "checks" }, h("label", { class: "check" }, enabled, h("span", {}, t("gui-web-enabled")))),
+    fields,
+    info,
+    errorEl,
+    h("div", { class: "modal-actions" }, h("button", { class: "btn primary", type: "submit" }, t("gui-save"))),
+  );
+  return form;
+}
+
+// What this computer is used for; adding a role installs its drivers.
+function rolesForm(current) {
+  const server = h("input", { type: "checkbox", checked: current.server });
+  const client = h("input", { type: "checkbox", checked: current.client });
+  const note = h("p", { class: "note" }, t("gui-roles-client-note"));
+  const save = h("button", { class: "btn primary", type: "submit" }, t("gui-save"));
+  const update = () => {
+    save.disabled = !server.checked && !client.checked;
+    // Only Windows installs a driver (usbip-win2) for the client role.
+    note.hidden = !(state.os === "windows" && client.checked && !current.client);
+  };
+  server.addEventListener("change", update);
+  client.addEventListener("change", update);
+  update();
+  const form = h(
+    "form",
+    {
+      class: "card",
+      onsubmit: (e) => {
+        e.preventDefault();
+        act(async () => {
+          save.disabled = true;
+          save.textContent = t("gui-roles-applying");
+          try {
+            await api("set_roles", { server: server.checked, client: client.checked });
+            toast(t("gui-saved"));
+            state.status = await api("status");
+          } finally {
+            save.textContent = t("gui-save");
+          }
+          await render();
+        });
+      },
+    },
+    h("h2", {}, t("gui-roles-title")),
+    h("p", {}, t("gui-roles-body")),
+    h(
+      "div",
+      { class: "checks" },
+      h("label", { class: "check" }, server, h("span", {}, t("gui-role-server"))),
+      h("label", { class: "check" }, client, h("span", {}, t("gui-role-client"))),
+    ),
+    note,
+    h("div", { class: "modal-actions" }, save),
+  );
+  return form;
+}
+
+// This user may not use the service's socket (Linux: not in the usbnexus
+// group). On Linux a button fixes it through polkit.
+function pageServicePermission() {
+  const grant = h("button", { class: "btn primary" }, t("gui-grant-access"));
+  grant.onclick = () =>
+    act(async () => {
+      grant.disabled = true;
+      try {
+        await invoke("grant_access");
+        toast(t("gui-grant-access-done"));
+        state.serviceDown = false;
+        await refresh();
+      } finally {
+        grant.disabled = false;
+      }
+    });
+  return h(
+    "div",
+    { class: "down" },
+    h("img", { src: "logo.svg", alt: "" }),
+    h("h1", {}, t("gui-service-denied-title")),
+    h("p", {}, t("gui-service-denied-body")),
+    h("p", {}, t("gui-service-denied-command")),
+    h("code", {}, "sudo usbnexus allow-user " + t("gui-service-denied-user")),
+    h("div", {}, state.os === "linux" ? grant : null, " ", h("button", { class: "btn", onclick: () => refresh() }, t("gui-retry"))),
+  );
 }
 
 function pageServiceDown() {
+  if (state.serviceDownReason === "permission_denied") return pageServicePermission();
   return h(
     "div",
     { class: "down" },
@@ -1057,6 +1364,18 @@ function pageServiceDown() {
           ]
         : [h("p", {}, t("gui-service-down-linux")), h("code", {}, "sudo systemctl start usbnexus")]),
     h("div", {}, h("button", { class: "btn primary", onclick: () => refresh() }, t("gui-retry"))),
+  );
+}
+
+// Something a role still needs on this computer (e.g. kernel modules).
+function setupBanner(issue) {
+  if (issue.code !== "kernel_modules_missing") return null;
+  return h(
+    "div",
+    { class: "banner" },
+    t("gui-setup-kernel-modules", { modules: issue.detail }),
+    " ",
+    issue.command ? h("code", {}, issue.command) : t("gui-setup-kernel-modules-nocmd"),
   );
 }
 
@@ -1080,11 +1399,15 @@ async function render() {
     main.replaceChildren(pageServiceDown());
     return;
   }
+  // The current view may belong to a role this computer no longer has.
+  if (!visibleViews().some(([id]) => id === state.view)) state.view = visibleViews()[0][0];
   const seq = ++renderSeq;
   try {
     const content = await PAGES[state.view]();
     if (seq !== renderSeq) return; // a newer render started meanwhile
-    main.replaceChildren(h("div", { class: "page" }, content));
+    const reboot = state.status && state.status.reboot_required ? h("div", { class: "banner" }, t("gui-reboot-required")) : null;
+    const issues = ((state.status && state.status.setup_issues) || []).map(setupBanner);
+    main.replaceChildren(h("div", { class: "page" }, reboot, issues, content));
   } catch (err) {
     if (err instanceof ServiceDown || seq !== renderSeq) return;
     main.replaceChildren(h("div", { class: "page" }, h("div", { class: "list" }, h("div", { class: "empty" }, errorText(err)))));
@@ -1102,7 +1425,7 @@ async function refresh() {
     /* handled by api() */
   }
   // First run: ask who may use shared devices (once per window).
-  if (state.status && !state.status.policy_chosen && !state.policyAsked && document.getElementById("modal").hidden) {
+  if (state.status && roles().server && !state.status.policy_chosen && !state.policyAsked && document.getElementById("modal").hidden) {
     state.policyAsked = true;
     policyDialog();
   }

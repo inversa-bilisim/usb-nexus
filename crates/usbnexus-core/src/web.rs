@@ -122,11 +122,110 @@ pub fn web_identity(state_dir: &Path, hostname: &str) -> Result<Identity> {
     let key = rcgen::KeyPair::generate().context("generating web key")?;
     let mut params = rcgen::CertificateParams::new(names).context("web certificate parameters")?;
     params.distinguished_name.push(rcgen::DnType::CommonName, format!("USB Nexus ({hostname})"));
+    // A plain server certificate: browsers accept it as its own trust
+    // anchor (see `trust_locally`), but it cannot sign other certificates.
+    params.is_ca = rcgen::IsCa::ExplicitNoCa;
+    params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature, rcgen::KeyUsagePurpose::KeyEncipherment];
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
     let cert = params.self_signed(&key).context("signing web certificate")?;
     let id = Identity { cert_der: cert.der().to_vec(), key_der: key.serialize_der() };
     crate::identity::write_private(&key_path, &id.key_der)?;
     std::fs::write(&cert_path, &id.cert_der)?;
     Ok(id)
+}
+
+/// Path of the web certificate in `state_dir`.
+pub fn cert_path(state_dir: &Path) -> std::path::PathBuf {
+    state_dir.join("web-cert.der")
+}
+
+/// SHA-1 thumbprint of a certificate, as Windows and macOS identify it.
+fn sha1_thumbprint(cert_der: &[u8]) -> String {
+    use sha1::Digest;
+    hex::encode(sha1::Sha1::digest(cert_der))
+}
+
+/// Whether this platform keeps a machine-wide trust store the daemon can
+/// add the web certificate to.
+pub fn can_trust_locally() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+}
+
+/// Adds the web certificate to this computer's trusted root store, so the
+/// browsers on this computer open the interface without a warning. Windows:
+/// the machine's Root store through certutil; macOS: the System keychain.
+/// Other computers still see a self-signed certificate. Needs to run as
+/// administrator (the service does). Returns `Ok(false)` where nothing is
+/// done (Linux: every browser has its own store).
+pub fn trust_locally(cert_path: &Path) -> Result<bool> {
+    #[cfg(windows)]
+    {
+        let out = certutil().args(["-f", "-addstore", "Root"]).arg(cert_path).output().context("running certutil")?;
+        if !out.status.success() {
+            anyhow::bail!("certutil -addstore: {}", String::from_utf8_lossy(&out.stdout).trim());
+        }
+        Ok(true)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("/usr/bin/security")
+            .args(["add-trusted-cert", "-d", "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain"])
+            .arg(cert_path)
+            .output()
+            .context("running security")?;
+        if !out.status.success() {
+            anyhow::bail!("security add-trusted-cert: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(true)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = cert_path;
+        Ok(false)
+    }
+}
+
+/// Removes the web certificate from the trusted root store again (on
+/// uninstall). Nothing happens when there is no certificate.
+pub fn untrust_locally(state_dir: &Path) -> Result<()> {
+    let Ok(der) = std::fs::read(cert_path(state_dir)) else { return Ok(()) };
+    let thumbprint = sha1_thumbprint(&der);
+    #[cfg(windows)]
+    {
+        let out = certutil().args(["-delstore", "Root", &thumbprint]).output().context("running certutil")?;
+        if !out.status.success() {
+            anyhow::bail!("certutil -delstore: {}", String::from_utf8_lossy(&out.stdout).trim());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("/usr/bin/security")
+            .args(["delete-certificate", "-Z", &thumbprint, "-t", "/Library/Keychains/System.keychain"])
+            .output()
+            .context("running security")?;
+        if !out.status.success() {
+            anyhow::bail!("security delete-certificate: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = thumbprint;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn certutil() -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let system32 = std::env::var_os("SystemRoot")
+        .map(|r| Path::new(&r).join("System32"))
+        .unwrap_or_else(|| Path::new(r"C:\Windows\System32").to_path_buf());
+    let mut cmd = std::process::Command::new(system32.join("certutil.exe"));
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
 }
 
 fn tls_config(id: &Identity) -> Result<Arc<rustls::ServerConfig>> {
@@ -159,14 +258,30 @@ struct Peer(SocketAddr);
 
 /// A running web interface; stops when dropped.
 pub struct WebServer {
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
     pub addr: SocketAddr,
     pub fingerprint: String,
+    /// Whether the certificate is in this computer's trusted root store
+    /// (see [`trust_locally`]); set by the daemon after starting.
+    pub trusted_locally: bool,
+}
+
+impl WebServer {
+    /// Stops the server and waits until its listening socket is closed, so
+    /// the port can be bound again right away.
+    pub async fn stop(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 impl Drop for WebServer {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -180,6 +295,7 @@ pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSett
         .await
         .with_context(|| format!("listening on {}", settings.listen_addr()))?;
     let addr = listener.local_addr()?;
+    let port = addr.port();
     let acceptor = TlsAcceptor::from(tls_config(id)?);
     let state = Arc::new(WebState {
         daemon,
@@ -191,9 +307,25 @@ pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSett
     let app = router(state);
     let task = tokio::spawn(async move {
         loop {
-            let Ok((tcp, peer)) = listener.accept().await else { continue };
+            let Ok((tcp, peer)) = listener.accept().await else {
+                // Out of sockets or similar: do not spin.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            };
             let (acceptor, app) = (acceptor.clone(), app.clone());
             tokio::spawn(async move {
+                // A TLS connection starts with a handshake record (0x16);
+                // anything else is most likely plain HTTP typed without
+                // "https://", which is sent to the right address.
+                let mut first = [0u8; 1];
+                match tokio::time::timeout(Duration::from_secs(10), tcp.peek(&mut first)).await {
+                    Ok(Ok(1..)) if first[0] == 0x16 => {}
+                    Ok(Ok(1..)) => {
+                        let _ = redirect_to_https(tcp, port).await;
+                        return;
+                    }
+                    _ => return,
+                }
                 let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await else {
                     return;
                 };
@@ -202,7 +334,40 @@ pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSett
             });
         }
     });
-    Ok(WebServer { task, addr, fingerprint: fingerprint(&id.cert_der) })
+    Ok(WebServer { task: Some(task), addr, fingerprint: fingerprint(&id.cert_der), trusted_locally: false })
+}
+
+/// Answers a plain HTTP request on the HTTPS port with a redirect to the
+/// same host over HTTPS.
+async fn redirect_to_https(mut tcp: tokio::net::TcpStream, port: u16) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let read_head = async {
+        while buf.len() < 8192 && !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = tcp.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok::<_, std::io::Error>(())
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(5), read_head).await;
+    let head = String::from_utf8_lossy(&buf);
+    // Only a plain host name or address (with port) goes into the header.
+    let host = head
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)))
+        .unwrap_or_else(|| format!("localhost:{port}"));
+    let reply = format!(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: https://{host}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    tcp.write_all(reply.as_bytes()).await?;
+    tcp.shutdown().await
 }
 
 fn router(state: Arc<WebState>) -> Router {
@@ -262,7 +427,12 @@ struct UiStrings {
 }
 
 async fn strings(Query(q): Query<LangQuery>) -> Response {
-    let lang = usbnexus_i18n::detect(q.lang.as_deref().filter(|l| !l.is_empty()));
+    // A choice, or the browser's languages ("fr-FR,tr,en"): the first one
+    // we have, else English. Without either, the computer's language.
+    let lang = match q.lang.as_deref().filter(|l| !l.is_empty()) {
+        Some(list) => list.split(',').find_map(usbnexus_i18n::match_locale).unwrap_or(usbnexus_i18n::FALLBACK),
+        None => usbnexus_i18n::detect(None),
+    };
     json(
         StatusCode::OK,
         &UiStrings { os: "web", lang, languages: usbnexus_i18n::languages(), messages: usbnexus_i18n::templates(lang) },

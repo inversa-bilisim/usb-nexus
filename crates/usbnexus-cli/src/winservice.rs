@@ -14,14 +14,15 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use usbnexus_i18n::t;
 use windows_service::service::{
-    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo,
-    ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceErrorControl,
+    ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState,
+    ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
-use crate::{Ctx, ServeOpts};
+use crate::{Ctx, InstallOpts, ServeOpts, WebAccessArg};
 
 pub const SERVICE_NAME: &str = "usbnexus";
 const DISPLAY_NAME: &str = "USB Nexus";
@@ -95,6 +96,59 @@ fn uninstall_drivers(manager: &ServiceManager) {
     }
 }
 
+/// Sets up what `roles` need when they are chosen in the app: the VBoxUSB
+/// drivers for sharing, the bundled usbip-win2 for using remote devices.
+/// Returns whether Windows must be restarted. Runs inside the service
+/// (LocalSystem).
+pub fn prepare_roles(roles: usbnexus_core::api::Roles) -> Result<bool> {
+    if roles.server {
+        let manager = ServiceManager::local_computer(
+            None::<&str>,
+            ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+        )
+        .context("opening the service manager")?;
+        install_drivers(&manager)?;
+        start_monitor();
+    }
+    if roles.client && usbnexus_core::windows::WindowsImport::default().usbip_exe().is_err() {
+        return install_usbip_win2();
+    }
+    Ok(false)
+}
+
+/// Runs the usbip-win2 installer bundled next to the executable, silently;
+/// returns whether Windows must be restarted.
+fn install_usbip_win2() -> Result<bool> {
+    let setup = std::env::current_exe()?
+        .parent()
+        .context("no executable directory")?
+        .join("usbip-win2")
+        .join("usbip-win2-setup.exe");
+    if !setup.is_file() {
+        return Err(usbnexus_core::api::ApiError::new("driver_missing", "usbip-win2 setup is not bundled").into());
+    }
+    // Same options as the installer (packaging/windows/hooks.nsh).
+    let status = std::process::Command::new(&setup)
+        .args([
+            "/SILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NOCANCEL",
+            "/SP-",
+            "/NORESTART",
+            "/RESTARTEXITCODE=3010",
+            "/CLOSEAPPLICATIONS",
+            "/COMPONENTS=main,client",
+            "/TASKS=vcredist",
+        ])
+        .status()
+        .with_context(|| format!("running {}", setup.display()))?;
+    match status.code() {
+        Some(0) => Ok(false),
+        Some(3010) => Ok(true),
+        code => bail!("usbip-win2 setup failed (exit code {code:?})"),
+    }
+}
+
 /// Starts the capture monitor so devices can be shared (best effort).
 fn start_monitor() {
     let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else { return };
@@ -107,7 +161,28 @@ fn start_monitor() {
     }
 }
 
-pub fn install() -> Result<()> {
+/// Installs (or updates) and starts the service with the roles and web
+/// settings in `opts`; returns once the service answers.
+pub async fn install(ctx: &Ctx, opts: InstallOpts) -> Result<()> {
+    use usbnexus_core::api::Roles;
+    use usbnexus_core::daemon::{apply_setup, Setup};
+
+    let roles = Roles { server: !opts.no_server, client: !opts.no_client };
+    let web_password = match &opts.web_password_file {
+        Some(path) => Some(read_password_file(path)?),
+        None => None,
+    };
+    let setup = Setup {
+        roles: Some(roles),
+        web_enabled: opts.web.map(|w| !matches!(w, WebAccessArg::Off)),
+        web_lan: match opts.web {
+            Some(WebAccessArg::Network) => Some(true),
+            Some(WebAccessArg::Local) => Some(false),
+            _ => None,
+        },
+        web_port: opts.web_port,
+        web_password,
+    };
     let exe = std::env::current_exe()?;
     let manager = ServiceManager::local_computer(
         None::<&str>,
@@ -126,11 +201,38 @@ pub fn install() -> Result<()> {
         account_name: None, // LocalSystem
         account_password: None,
     };
-    install_drivers(&manager)?;
-    let service = manager
-        .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
-        .context("creating the service")?;
+    // Installing over an earlier version updates the existing service; it
+    // is stopped first, as it rewrites the configuration while running.
+    let access =
+        ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS;
+    let existing = manager.open_service(SERVICE_NAME, access).ok();
+    if let Some(service) = &existing {
+        stop_and_wait(service)?;
+    }
+    apply_setup(&ctx.dir, setup)?;
+    if roles.server {
+        install_drivers(&manager)?;
+    }
+    let service = match existing {
+        Some(service) => {
+            service.change_config(&info).context("updating the service")?;
+            service
+        }
+        None => manager.create_service(&info, access).context("creating the service")?,
+    };
     service.set_description(DESCRIPTION)?;
+    // Restart after a crash or an error exit: 5 s, 10 s, then every 30 s;
+    // the count resets after a day without failures.
+    let restart = |secs| ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(secs) };
+    service
+        .update_failure_actions(ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
+            reboot_msg: None,
+            command: None,
+            actions: Some(vec![restart(5), restart(10), restart(30)]),
+        })
+        .context("setting the service recovery actions")?;
+    service.set_failure_actions_on_non_crash_failures(true)?;
 
     // Best effort: without it only outgoing connections work.
     let program = format!("program={}", exe.display());
@@ -148,16 +250,40 @@ pub fn install() -> Result<()> {
         .output();
 
     service.start(&[] as &[&OsStr]).context("starting the service")?;
+    wait_until_answering(ctx).await;
     println!("{}", t!("service-installed"));
     Ok(())
 }
 
-pub fn uninstall() -> Result<()> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .context("opening the service manager (run as administrator)")?;
-    let service = manager
-        .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE)
-        .context("opening the service")?;
+/// Reads a password file: UTF-8, or UTF-16LE with a byte order mark (as
+/// the installer writes it); a trailing line break is ignored.
+fn read_password_file(path: &std::path::Path) -> Result<String> {
+    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let text = match data.strip_prefix(&[0xFF, 0xFE]) {
+        Some(utf16) => {
+            let units: Vec<u16> = utf16.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            String::from_utf16(&units).context("password file is not valid UTF-16")?
+        }
+        None => String::from_utf8(data).context("password file is not valid UTF-8")?,
+    };
+    Ok(text.trim_start_matches('\u{feff}').trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// Waits (up to 30 s) until the started service answers on its pipe, so
+/// whatever runs next (the app, the installer's browser) finds it ready.
+async fn wait_until_answering(ctx: &Ctx) {
+    use usbnexus_core::api::{self, Request, StatusView};
+    for _ in 0..60 {
+        if api::call::<StatusView>(&ctx.socket, &Request::Status).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    tracing::warn!("the service did not answer within 30 s");
+}
+
+/// Stops a running service and waits (up to 5 s) until it has stopped.
+fn stop_and_wait(service: &windows_service::service::Service) -> Result<()> {
     if service.query_status()?.current_state != ServiceState::Stopped {
         let _ = service.stop();
         for _ in 0..50 {
@@ -167,6 +293,19 @@ pub fn uninstall() -> Result<()> {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+    Ok(())
+}
+
+pub fn uninstall(ctx: &Ctx) -> Result<()> {
+    if let Err(e) = usbnexus_core::web::untrust_locally(&ctx.dir) {
+        eprintln!("{e:#}");
+    }
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("opening the service manager (run as administrator)")?;
+    let service = manager
+        .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE)
+        .context("opening the service")?;
+    stop_and_wait(&service)?;
     service.delete().context("deleting the service")?;
     uninstall_drivers(&manager);
     let _ = std::process::Command::new("netsh")
@@ -219,7 +358,9 @@ fn run_service() -> Result<()> {
     })?;
     handle.set_service_status(status(ServiceState::StartPending, 0))?;
 
-    start_monitor();
+    if usbnexus_core::daemon::saved_roles(&ctx.dir).server {
+        start_monitor();
+    }
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(async {
         let mut stop_rx = stop_rx;

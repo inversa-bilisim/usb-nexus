@@ -56,6 +56,89 @@ where
     end
 }
 
+/// When data last went through a [`Watched`] stream, in either direction.
+#[derive(Clone)]
+pub struct Activity {
+    start: std::time::Instant,
+    last_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Default for Activity {
+    fn default() -> Self {
+        Activity { start: std::time::Instant::now(), last_ms: Default::default() }
+    }
+}
+
+impl Activity {
+    fn touch(&self) {
+        let ms = self.start.elapsed().as_millis() as u64;
+        self.last_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Time since the last byte (or since the start).
+    pub fn idle(&self) -> std::time::Duration {
+        let last = self.last_ms.load(std::sync::atomic::Ordering::Relaxed);
+        self.start.elapsed().saturating_sub(std::time::Duration::from_millis(last))
+    }
+}
+
+/// A stream that records its traffic in an [`Activity`]. On a USB/IP
+/// socket, a request the device has not answered yet (e.g. a pending
+/// interrupt transfer) is no traffic, so an unused device counts as idle.
+pub struct Watched<S> {
+    inner: S,
+    activity: Activity,
+}
+
+impl<S> Watched<S> {
+    pub fn new(inner: S, activity: Activity) -> Self {
+        Watched { inner, activity }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Watched<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let r = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        if matches!(r, std::task::Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            self.activity.touch();
+        }
+        r
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Watched<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let r = std::pin::Pin::new(&mut self.inner).poll_write(cx, data);
+        if matches!(r, std::task::Poll::Ready(Ok(n)) if n > 0) {
+            self.activity.touch();
+        }
+        r
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 /// Errors that typically come from writing to a peer that has gone away.
 fn is_local_write_error(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset)
@@ -84,6 +167,22 @@ mod tests {
 
         drop(remote_peer);
         assert!(task.await.unwrap().is_remote());
+    }
+
+    #[tokio::test]
+    async fn watched_streams_record_traffic() {
+        let (a, mut b) = tokio::io::duplex(64);
+        let activity = Activity::default();
+        let mut w = Watched::new(a, activity.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(activity.idle() >= std::time::Duration::from_millis(50));
+        w.write_all(b"x").await.unwrap();
+        assert!(activity.idle() < std::time::Duration::from_millis(50));
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        b.write_all(b"y").await.unwrap();
+        let mut buf = [0u8; 1];
+        w.read_exact(&mut buf).await.unwrap();
+        assert!(activity.idle() < std::time::Duration::from_millis(50));
     }
 
     #[tokio::test]

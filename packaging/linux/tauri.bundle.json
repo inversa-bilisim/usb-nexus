@@ -5,10 +5,12 @@
     "linux": {
       "deb": {
         "depends": ["usbnexus (>= 0.1.0)"],
+        "recommends": ["libayatana-appindicator3-1"],
         "section": "net"
       },
       "rpm": {
-        "depends": ["usbnexus >= 0.1.0"]
+        "depends": ["usbnexus >= 0.1.0"],
+        "recommends": ["libayatana-appindicator-gtk3"]
       }
     }
   }

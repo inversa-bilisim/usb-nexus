@@ -829,3 +829,122 @@ select {
 .nowrap {
   white-space: nowrap;
 }
+
+.banner {
+  max-width: 640px;
+  margin-bottom: 18px;
+  padding: 10px 14px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-radius: var(--radius);
+}
+
+/* Device details dialog */
+.modal.wide {
+  max-width: 880px;
+  width: calc(100vw - 48px);
+}
+
+.cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 28px;
+  margin-top: 6px;
+}
+
+.cols > div {
+  min-width: 0;
+}
+
+.col-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.detail-section {
+  margin: 14px 0 6px;
+  font-weight: 600;
+}
+
+.cols .detail-section:first-of-type {
+  margin-top: 0;
+}
+
+.meta-line {
+  margin: -6px 0 10px;
+}
+
+.user-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.queue {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.queue li {
+  margin: 2px 0;
+}
+
+.handover {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.handover .row2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.handover select,
+.handover input {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.handover input {
+  width: 70px;
+}
+
+.small-text {
+  font-size: 12.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.small-text svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.web-fields .field {
+  margin-top: 10px;
+}
+
+@media (max-width: 760px) {
+  .cols {
+    grid-template-columns: 1fr;
+  }
+}

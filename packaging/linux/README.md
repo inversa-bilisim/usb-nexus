@@ -1,24 +1,31 @@
 # Linux
 
-## Paketler
+**English** · [Türkçe](README.tr.md)
 
-| Paket | İçerik |
+## Packages
+
+| Package | Contents |
 |---|---|
-| `usbnexus` | `/usr/bin/usbnexus`, systemd hizmeti, `usbnexus` grubu. Ekransız sunucular için tek başına yeterli. |
-| `usb-nexus` | Masaüstü uygulaması (`usbnexus-desktop`); `usbnexus` paketine bağımlıdır. |
+| `usbnexus` | `/usr/bin/usbnexus`, the systemd service, the `usbnexus` group. Enough on its own for headless servers. |
+| `usb-nexus` | Desktop app (`usbnexus-desktop`); depends on `usbnexus`. |
 
-Kurulum hizmeti etkinleştirip başlatır. Masaüstü uygulamasını kullanacak kişiyi gruba ekleyin ve oturumu
-yeniden açın:
+Installing enables and starts the service:
 
 ```sh
-sudo apt install ./usbnexus_*.deb ./usb-nexus_*.deb      # veya: sudo dnf install ./usbnexus-*.rpm ./USB*.rpm
-sudo usermod -aG usbnexus "$USER"
+sudo apt install ./usbnexus_*.deb ./usb-nexus_*.deb      # or: sudo dnf install ./usbnexus-*.rpm ./USB*.rpm
 ```
 
-Çekirdek modülleri `usbip-host` ve `vhci-hcd` gereklidir (Ubuntu'da `linux-modules-extra-$(uname -r)` paketinde).
-Hizmet başlarken bunları kendisi yükler.
+- **User access:** the desktop app can control the service only for members of the `usbnexus`
+  group. When a user lacks it, the app shows an **"Allow this user"** button (asks for the
+  administrator password; takes effect at once). By hand: `sudo usbnexus allow-user USER`.
+- **Kernel modules:** `usbip-host` and `vhci-hcd` come with the kernel of most distributions; the
+  service loads them itself. Where they are missing (Ubuntu cloud kernels:
+  `linux-modules-extra-$(uname -r)`; Fedora/RHEL: `kernel-modules-extra`, which the RPM recommends)
+  the app and the web interface show the package to install.
+- Both roles (server and client) are active; the web interface is off until
+  `sudo usbnexus web enable` (see the main README).
 
-## Paket üretme
+## Building the packages
 
 ```sh
 cargo install cargo-deb cargo-generate-rpm --locked
@@ -31,7 +38,7 @@ cargo generate-rpm -p crates/usbnexus-cli            # target/generate-rpm/usbne
                                                      # target/release/bundle/{deb,rpm}/
 ```
 
-## Elle kurulum (paketsiz)
+## Manual installation (without packages)
 
 ```sh
 sudo install -m 755 target/release/usbnexus /usr/bin/usbnexus
@@ -40,7 +47,7 @@ sudo install -m 644 packaging/linux/usbnexus.sysusers /usr/lib/sysusers.d/usbnex
 sudo systemd-sysusers && sudo systemctl daemon-reload && sudo systemctl enable --now usbnexus
 ```
 
-- Durum: `systemctl status usbnexus`, günlük: `journalctl -u usbnexus -f`
-- Ayarlar ve anahtarlar: `/var/lib/usbnexus`
-- Denetim soketi: `/run/usbnexus/daemon.sock` (yalnızca `root` ve `usbnexus` grubu)
-- Paket kaldırılırken (`purge`) ayarlar da silinir.
+- Status: `systemctl status usbnexus`; log: `journalctl -u usbnexus -f`
+- Settings and keys: `/var/lib/usbnexus`
+- Control socket: `/run/usbnexus/daemon.sock` (`root` and the `usbnexus` group only)
+- Purging the package (`purge`) deletes the settings too.

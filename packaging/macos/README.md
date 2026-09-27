@@ -1,32 +1,35 @@
 # macOS
 
-## Neler destekleniyor
+**English** · [Türkçe](README.tr.md)
 
-| Senaryo | Durum |
+## What is supported
+
+| Scenario | Status |
 |---|---|
-| **Bu Mac'e takılı cihazı paylaşmak** (Mac sunucu) | libusb ile. macOS'un kendi sürücüsü olmayan cihazlar (programlayıcılar, geliştirme kartları, bazı yazıcı/tarayıcılar, özel donanım) paylaşılabilir. |
-| USB bellek, klavye, fare gibi macOS'un kendi sürücüsüyle kullandığı cihazlar | Apple'ın `com.apple.vm.device-access` yetkisi gerekir; bu yetki olmadan "işletim sistemi kullanıyor" hatası verilir. |
-| **Uzaktaki cihazı Mac'te kullanmak** (Mac istemci) | Desteklenmiyor: macOS, üçüncü taraflara sanal USB denetleyici yazma imkânı vermiyor. |
-| İzokron (ses/görüntü) aktarımları | Henüz yok. |
+| **Sharing a device plugged into this Mac** (Mac as server) | Through libusb. Devices without a macOS driver of their own (programmers, development boards, some printers/scanners, custom hardware) can be shared. |
+| Devices macOS uses with its own driver (USB sticks, keyboards, mice) | Need Apple's `com.apple.vm.device-access` entitlement; without it they are reported as "used by the operating system". |
+| **Using a remote device on the Mac** (Mac as client) | Not supported: macOS does not let third parties provide a virtual USB controller. |
+| Isochronous transfers (audio/video) | Not yet. |
 
-## Paket oluşturma (Mac üzerinde)
+## Building the package (on a Mac)
 
 ```sh
 cargo install tauri-cli --version "^2" --locked
 packaging/macos/build-pkg.sh
 ```
 
-Çıktı: `target/USB Nexus-<sürüm>.pkg`. Kurulum:
+Output: `target/USB Nexus-<version>.pkg`. It installs:
 
-- `/usr/local/bin/usbnexus` (komut satırı + hizmet)
-- `/Library/LaunchDaemons/org.usbnexus.daemon.plist` (açılışta root olarak başlar)
+- `/usr/local/bin/usbnexus` (command line + service)
+- `/Library/LaunchDaemons/org.usbnexus.daemon.plist` (starts as root at boot)
 - `/Applications/USB Nexus.app`
 
-Ayarlar ve anahtarlar `/Library/Application Support/USB Nexus`, günlük `/Library/Logs/USB Nexus/daemon.log`.
-Masaüstü uygulamasını `admin` grubundaki kullanıcılar kullanabilir. Kaldırmak için: `sudo packaging/macos/uninstall.sh`.
+Settings and keys live in `/Library/Application Support/USB Nexus`, the log in
+`/Library/Logs/USB Nexus/daemon.log`. Members of the `admin` group can use the desktop app.
+To uninstall: `sudo packaging/macos/uninstall.sh`.
 
-## İmzalama ve noter onayı
+## Signing and notarization
 
-İmzasız paket ve uygulama çalışır, ancak Gatekeeper ilk açılışta uyarı verir (Finder'da sağ tık → Aç).
-Uyarısız dağıtım için bir Apple Developer hesabı (yıllık ücretli) ile `SIGN_APP` / `SIGN_PKG`
-değişkenleri verilerek imzalanmalı ve `xcrun notarytool` ile noter onayı alınmalıdır.
+The unsigned package and app work, but Gatekeeper warns on first launch (right-click → Open in
+Finder). For warning-free distribution, sign with an Apple Developer account (paid, yearly) by
+setting `SIGN_APP` / `SIGN_PKG`, and notarize with `xcrun notarytool`.

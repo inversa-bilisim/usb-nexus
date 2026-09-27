@@ -11,3 +11,5 @@ repository.workspace = true
 fluent-bundle.workspace = true
 unic-langid.workspace = true
 fluent-syntax = "0.12"
+# The operating system's preferred UI languages (Windows, macOS, ...).
+sys-locale = "0.3"

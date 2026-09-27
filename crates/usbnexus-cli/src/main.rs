@@ -78,11 +78,41 @@ impl ServeOpts {
 #[cfg(windows)]
 #[derive(Subcommand)]
 enum ServiceCmd {
-    Install,
+    Install(InstallOpts),
     Uninstall,
     /// Entry point for the Windows service manager.
     #[command(hide = true)]
     Run,
+}
+
+/// Settings the installer passes to `service install`; omitted web options
+/// keep their current values.
+#[cfg(windows)]
+#[derive(clap::Args, Default)]
+pub struct InstallOpts {
+    /// Do not set up sharing this computer's devices.
+    #[arg(long)]
+    no_server: bool,
+    /// Do not set up using other computers' devices.
+    #[arg(long)]
+    no_client: bool,
+    #[arg(long, value_enum)]
+    web: Option<WebAccessArg>,
+    #[arg(long)]
+    web_port: Option<u16>,
+    /// File holding the new web password (read, then left to the caller to delete).
+    #[arg(long, value_name = "FILE")]
+    web_password_file: Option<PathBuf>,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum WebAccessArg {
+    Off,
+    /// Only from this computer.
+    Local,
+    /// From the whole network.
+    Network,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -102,6 +132,14 @@ enum WebCmd {
     Disable,
     Password,
     Status,
+    /// Exit status 0 if the web interface could use this port, 1 if not.
+    #[command(hide = true)]
+    CheckPort {
+        port: u16,
+    },
+    /// Exit status 0 if a web password is set (for the installer).
+    #[command(hide = true)]
+    HasPassword,
 }
 
 #[derive(Subcommand)]
@@ -122,6 +160,11 @@ enum Cmd {
         seconds: u64,
     },
     Local,
+    /// Lets a user control the service from the desktop app (Linux).
+    #[cfg(target_os = "linux")]
+    AllowUser {
+        user: String,
+    },
     Discover {
         #[arg(long, default_value_t = 3)]
         timeout: u64,
@@ -266,6 +309,14 @@ fn main() -> ExitCode {
                 .with_writer(std::sync::Mutex::new(file))
                 .init();
         }
+        // A panic would otherwise go to a console nobody sees and could leave
+        // a half-working service behind (e.g. a dead local API task). Log it
+        // and exit so the service manager restarts the service.
+        std::panic::set_hook(Box::new(|info| {
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            tracing::error!("panic: {info}\n{backtrace}");
+            std::process::exit(1);
+        }));
         return match winservice::run(ctx) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -295,13 +346,15 @@ async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Daemon(opts) | Cmd::Serve(opts) => run_daemon(ctx, opts, shutdown_signal()).await,
         Cmd::Web { action } => web(ctx, action).await,
         #[cfg(windows)]
-        Cmd::Service { action: ServiceCmd::Install } => winservice::install(),
+        Cmd::Service { action: ServiceCmd::Install(opts) } => winservice::install(ctx, opts).await,
         #[cfg(windows)]
-        Cmd::Service { action: ServiceCmd::Uninstall } => winservice::uninstall(),
+        Cmd::Service { action: ServiceCmd::Uninstall } => winservice::uninstall(ctx),
         #[cfg(windows)]
         Cmd::Service { action: ServiceCmd::Run } => unreachable!("handled in main"),
         Cmd::Pin { seconds } => pin(ctx, seconds).await,
         Cmd::Local => local(),
+        #[cfg(target_os = "linux")]
+        Cmd::AllowUser { user } => allow_user(ctx, &user),
         Cmd::Discover { timeout } => discover(ctx, timeout).await,
         Cmd::Pair { server, pin } => pair(ctx, &server, pin).await,
         Cmd::List { server } => list(ctx, &server).await,
@@ -342,6 +395,105 @@ fn require_root() -> Result<()> {
     Ok(())
 }
 
+/// Linux: the usbip kernel modules each role needs, and how to get them.
+#[cfg(target_os = "linux")]
+mod linux_setup {
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use usbnexus_core::api::{Roles, SetupIssue};
+
+    /// Loading is retried this often while a module is missing.
+    const MODPROBE_INTERVAL: Duration = Duration::from_secs(30);
+
+    fn loaded(module: &str) -> bool {
+        match module {
+            "usbip-host" => Path::new("/sys/bus/usb/drivers/usbip-host").is_dir(),
+            "vhci-hcd" => Path::new("/sys/devices/platform/vhci_hcd.0").is_dir(),
+            _ => false,
+        }
+    }
+
+    /// The command that installs the modules on this distribution, if known.
+    fn install_command() -> Option<String> {
+        let os = std::fs::read_to_string("/etc/os-release").ok()?;
+        let field = |name: &str| {
+            os.lines()
+                .find_map(|l| l.strip_prefix(name)?.strip_prefix('='))
+                .map(|v| v.trim_matches('"').to_lowercase())
+                .unwrap_or_default()
+        };
+        let ids = format!("{} {}", field("ID"), field("ID_LIKE"));
+        if ids.contains("ubuntu") {
+            let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
+            return Some(format!("sudo apt install linux-modules-extra-{}", kernel.trim()));
+        }
+        if ["fedora", "rhel", "centos", "rocky", "almalinux"].iter().any(|d| ids.contains(d)) {
+            return Some("sudo dnf install kernel-modules-extra".to_string());
+        }
+        None
+    }
+
+    pub fn issues(roles: Roles) -> Vec<SetupIssue> {
+        static LAST_TRY: Mutex<Option<Instant>> = Mutex::new(None);
+        let wanted: Vec<&str> = [(roles.server, "usbip-host"), (roles.client, "vhci-hcd")]
+            .into_iter()
+            .filter_map(|(on, m)| on.then_some(m))
+            .collect();
+        let mut missing: Vec<&str> = wanted.iter().copied().filter(|m| !loaded(m)).collect();
+        if !missing.is_empty() {
+            // Installed since the service started? Try loading again.
+            let mut last = LAST_TRY.lock().unwrap();
+            if last.map_or(true, |t| t.elapsed() >= MODPROBE_INTERVAL) {
+                *last = Some(Instant::now());
+                for m in &missing {
+                    let _ = std::process::Command::new("modprobe").arg(m).output();
+                }
+                missing.retain(|m| !loaded(m));
+            }
+        }
+        if missing.is_empty() {
+            return vec![];
+        }
+        vec![SetupIssue {
+            code: "kernel_modules_missing".into(),
+            detail: missing.join(", "),
+            command: install_command(),
+        }]
+    }
+}
+
+/// Adds `user` to the `usbnexus` group so the desktop app may control the
+/// service, and grants access to the running service's socket right away
+/// (group membership only applies to new sessions).
+#[cfg(target_os = "linux")]
+fn allow_user(ctx: &Ctx, user: &str) -> Result<()> {
+    require_root()?;
+    if user.is_empty() || !user.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+        bail!(t!("allow-user-invalid", user = user));
+    }
+    let status =
+        std::process::Command::new("usermod").args(["-aG", "usbnexus", user]).status().context("running usermod")?;
+    if !status.success() {
+        bail!(t!("allow-user-failed", user = user));
+    }
+    let socket = &ctx.socket;
+    let now = socket.exists()
+        && std::process::Command::new("setfacl")
+            .arg("-m")
+            .arg(format!("u:{user}:rw"))
+            .arg(socket)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    println!("{}", t!("allow-user-done", user = user));
+    if !now {
+        println!("{}", t!("allow-user-relogin"));
+    }
+    Ok(())
+}
+
 fn hex4(v: u16) -> String {
     format!("{v:04x}")
 }
@@ -349,11 +501,24 @@ fn hex4(v: u16) -> String {
 /// Runs the service in the foreground. `serve` is the same with devices to
 /// share given on the command line (they are remembered).
 /// Picks the platform backends for the service.
-fn backends(
-    opts: &ServeOpts,
-) -> Result<(Arc<dyn usbnexus_core::backend::DeviceHost>, Arc<dyn usbnexus_core::backend::ImportBackend>)> {
+type Backends = (Arc<dyn usbnexus_core::backend::DeviceHost>, Arc<dyn usbnexus_core::backend::ImportBackend>);
+
+/// Backends for `roles`: a computer set up for one role only does not touch
+/// the other's drivers (e.g. no hub queries and no VBoxUSB on a client).
+fn backends_for(demo: bool, roles: usbnexus_core::api::Roles) -> Result<Backends> {
+    let (mut host, mut import) = backends(demo)?;
+    if !roles.server {
+        host = Arc::new(usbnexus_core::backend::NoHost);
+    }
+    if !roles.client {
+        import = Arc::new(usbnexus_core::backend::UnsupportedImport);
+    }
+    Ok((host, import))
+}
+
+fn backends(demo: bool) -> Result<Backends> {
     use usbnexus_core::backend::demo::{DemoHost, DemoImport};
-    if opts.demo {
+    if demo {
         return Ok((Arc::new(DemoHost), Arc::new(DemoImport::default())));
     }
     #[cfg(target_os = "linux")]
@@ -418,7 +583,7 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
     use usbnexus_core::daemon::{Daemon, DaemonOptions};
     use usbnexus_core::server::ServerEvent;
 
-    let (host, import) = backends(&opts)?;
+    let (host, import) = backends_for(opts.demo, usbnexus_core::daemon::saved_roles(&ctx.dir))?;
     let label = |u: &usbnexus_core::server::DeviceUse| u.device_name.clone().unwrap_or_else(|| u.device.clone());
     let events = Arc::new(move |ev: ServerEvent| match ev {
         ServerEvent::Paired { name, .. } => println!("{}", t!("serve-paired", name = name)),
@@ -441,6 +606,20 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
         events: Some(events),
     })
     .await?;
+    let demo = opts.demo;
+    #[cfg(target_os = "linux")]
+    if !demo {
+        d.set_setup_check(Arc::new(linux_setup::issues));
+    }
+    d.set_backend_factory(Arc::new(move |roles| {
+        // Install what the new roles need (drivers) before using them.
+        #[cfg(windows)]
+        let reboot = if demo { false } else { winservice::prepare_roles(roles)? };
+        #[cfg(not(windows))]
+        let reboot = false;
+        let (host, import) = backends_for(demo, roles)?;
+        Ok((host, import, reboot))
+    }));
 
     for busid in &opts.export {
         if let Response::Error { error } = d.handle(Request::SetShared { device: busid.clone(), shared: true }).await {
@@ -697,12 +876,14 @@ async fn attach(ctx: &Ctx, server: &str, device: &str) -> Result<()> {
     let backend = Arc::new(usbnexus_core::windows::WindowsImport::default());
     // Waiting for a device is reported once, not on every attempt.
     let waiting = std::cell::Cell::new(false);
+    let queue_position = std::cell::Cell::new(0);
     let events = |ev: AttachEvent| match ev {
         AttachEvent::Connecting { .. } if waiting.get() => {}
         AttachEvent::Connecting { addr } => println!("{}", t!("attach-connecting", addr = addr)),
         AttachEvent::Retrying { .. } if waiting.get() => {}
         AttachEvent::Attached { port, .. } => {
             waiting.set(false);
+            queue_position.set(0);
             println!("{}", t!("attach-attached", busid = device, port = port));
             println!("{}", t!("attach-stop-hint"));
         }
@@ -717,6 +898,13 @@ async fn attach(ctx: &Ctx, server: &str, device: &str) -> Result<()> {
             println!("{}", t!("attach-disconnected", reason = reason));
         }
         AttachEvent::Retrying { delay } => println!("{}", t!("attach-retrying", seconds = delay.as_secs_f64().ceil())),
+        // Printed when the place in the queue changes.
+        AttachEvent::Queued { position } => {
+            waiting.set(true);
+            if queue_position.replace(position) != position {
+                println!("{}", t!("attach-queued", position = position));
+            }
+        }
         AttachEvent::Detached => println!("{}", t!("attach-detached")),
     };
     tokio::select! {
@@ -761,8 +949,34 @@ fn print_web_status(s: &usbnexus_core::api::WebStatusView) {
         println!("{}", t!("web-local-only"));
     }
     if let Some(fp) = &s.fingerprint {
-        println!("{}", t!("web-fingerprint", fp = short_fingerprint(fp)));
+        let msg = if s.trusted_locally { "web-trusted" } else { "web-fingerprint" };
+        println!("{}", t!(msg, fp = short_fingerprint(fp)));
     }
+}
+
+/// Whether the web interface could listen on `port`: nobody listens on it,
+/// or it is already ours.
+fn check_port(ctx: &Ctx, port: u16) -> Result<()> {
+    // The service itself listens on DEFAULT_PORT.
+    if port == 0 || port == DEFAULT_PORT {
+        bail!("port {port} is reserved");
+    }
+    // Windows: read the listener tables. Listening on all interfaces, even
+    // for a moment, would make Windows Firewall ask about the installer's
+    // copy of this program.
+    #[cfg(windows)]
+    let free = !usbnexus_core::windows::tcp_port_listening(port);
+    // Elsewhere, try to listen (on loopback only).
+    #[cfg(not(windows))]
+    let free = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok();
+    if free {
+        return Ok(());
+    }
+    let web = usbnexus_core::daemon::saved_web(&ctx.dir);
+    if web.enabled && web.port() == port {
+        return Ok(()); // our own web interface
+    }
+    bail!("port {port} is in use")
 }
 
 async fn web(ctx: &Ctx, action: WebCmd) -> Result<()> {
@@ -772,6 +986,13 @@ async fn web(ctx: &Ctx, action: WebCmd) -> Result<()> {
         async move { api::call::<WebStatusView>(&socket, &req).await }
     };
     let status = match action {
+        WebCmd::CheckPort { port } => return check_port(ctx, port),
+        WebCmd::HasPassword => {
+            if usbnexus_core::daemon::saved_web(&ctx.dir).password_hash.is_some() {
+                return Ok(());
+            }
+            bail!("no web password is set");
+        }
         WebCmd::Status => call(Request::WebStatus).await?,
         WebCmd::Disable => {
             call(Request::WebConfigure { enabled: Some(false), lan: None, port: None, password: None }).await?

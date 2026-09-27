@@ -24,6 +24,7 @@ pub mod daemon;
 pub mod device_id;
 pub mod discovery;
 pub mod frame;
+pub mod handover;
 pub mod identity;
 pub mod pairing;
 pub mod relay;

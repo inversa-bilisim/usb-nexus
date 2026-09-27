@@ -66,6 +66,10 @@ pub enum ServerMsg {
     Error {
         code: ErrorCode,
         message: String,
+        /// With `DeviceBusy`: this client's place in the queue for the
+        /// device (1 = next).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_position: Option<u32>,
     },
 }
 
@@ -133,4 +137,6 @@ impl std::fmt::Display for ErrorCode {
 pub struct RemoteError {
     pub code: ErrorCode,
     pub message: String,
+    /// See [`ServerMsg::Error`].
+    pub queue_position: Option<u32>,
 }

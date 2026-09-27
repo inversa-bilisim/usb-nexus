@@ -31,6 +31,10 @@ installers. The GitHub repository is `inversa-bilisim/usb-nexus` (moved from
 | `packaging/{linux,windows,macos}` | systemd/sysusers + deb/rpm scripts; NSIS hooks + VBoxUSB drivers; launchd + pkg |
 | `.github/workflows` | `ci.yml` (fmt, clippy -D warnings, tests on Linux/Windows/macOS), `release.yml` (packages on `v*` tags) |
 
+Windows client needs usbip-win2 ≥ 0.9.7.6 (`attach --once`); its installer is
+downloaded by `packaging/windows/fetch-usbip-win2.ps1` (release CI) and offered
+by `hooks.nsh` when missing or too old.
+
 Backends: Linux `usbip-host`/`vhci-hcd` via sysfs; Windows client via
 usbip-win2 (`windows.rs` + `bridge.rs`), Windows server via VBoxUSB
 (`windows_host.rs`); macOS server via libusb (`libusb_host.rs`, also
@@ -81,6 +85,117 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
 - `usage.rs`: JSON lines in `usage.log`, retention 90 days (configurable),
   capped at 10 MB. Repeated refusals of one device to one computer are
   logged once per hour.
+
+## Agreed features (owner, 2026-09-26)
+
+### Language follows the operating system
+- Done: installer has no language selector (`displayLanguageSelector:
+  false`, English first = fallback); `usbnexus_i18n::detect` falls back to
+  the OS preferred UI languages (`sys-locale`) after the `LANG`-style
+  variables; the app's language box still wins.
+- Installer texts are `setup-*` messages in `locales/*.ftl` (plain text),
+  generated into `packaging/windows/usbnexus-strings.nsh`; the web UI
+  follows the browser's languages.
+- More languages (e.g. French) will be added later: new `locales/xx.ftl`,
+  `LOCALES`, and the NSIS `languages` list.
+
+### Role selection in the Windows installer (implemented; not yet tried on Windows)
+- Implementation: `packaging/windows/installer.nsi` is the tauri-cli 2.12.0
+  template (pinned in release.yml) + `usbnexus-pages.nsh`; texts are the
+  `setup-*` messages, generated into `usbnexus-strings.nsh` (test
+  `nsis_strings_are_current`). `service install --no-server --no-client
+  --web off|local|network --web-port --web-password-file` applies the
+  choices (`daemon::apply_setup`); config `roles` (None = both).
+  `Request::SetRoles` + `Daemon::set_backend_factory` switch roles at
+  runtime (Windows: `winservice::prepare_roles` installs VBoxUSB drivers or
+  the bundled usbip-win2; `status.reboot_required`).
+- Custom page after the install directory, all ticked by default:
+  - "Use as server": installs VBoxUSB drivers (no extra explanation text).
+  - "Use as client": installs the bundled usbip-win2 (replaces today's
+    message box). While ticked, a note below says usbip-win2 will be
+    installed (USB devices pause briefly, restart needed), or that it is
+    already installed; the note disappears when unticked.
+  - "Web access": if ticked, the next page configures it: password + repeat
+    (min 8, required), port (default 3242, editable, checked for being free
+    while still on the page, before installing; our own running service
+    holding it counts as free), "only this computer" (default) or "the whole
+    network".
+- Role page is plain (labels only, no descriptions). "Next" is disabled
+  (no message) unless server or client is ticked.
+- Web page: access radio ("only this computer" default / "whole network"),
+  port with live check message, password + repeat (min 8; "Next" disabled
+  until valid). On upgrade with a password already set, empty fields keep
+  it. Password only, no user name (single administrator).
+- If web access was set up, the finish opens https://localhost:<port> in
+  the default browser.
+- The service is always installed.
+- Upgrades remember the previous choices (registry) and preselect them.
+- Silent install (`/S`): server + client, web off.
+- In the app: screens of a role that is not installed are hidden
+  completely; Settings has a place to set up the missing role later
+  (server → drivers, client → usbip-win2) and the reverse.
+
+### Device details, waiting queue and automatic handover (implemented 2026-09-27; not yet tried on hardware)
+- Implementation: `handover.rs` (kinds, per-device `Handover` stored on
+  `SharedDevice`, `Offered::handover` = effective idle time); server
+  `Queues` (FIFO per device, `QUEUE_TTL` 15 s, `RESERVE_FOR` 10 s,
+  `handover_due` checks `relay::Activity` every second); busy errors carry
+  `queue_position`; clients retry every 2 s in `AttachState::Queued`.
+  API: `LocalDeviceView` gained `used_by_fingerprint`, `used_since`,
+  `queue`, `kind`, `handover`, `handover_seconds`; `Request::Disconnect`,
+  `Request::SetDeviceHandover`. UI: `deviceDialog()` (two columns:
+  permissions | status), rows of shared devices are clickable; Settings
+  has a web interface card (`webCard()`, app only; the web UI shows the
+  address and a note).
+- Clicking a device row on "This computer" opens a details dialog (the row
+  switch keeps toggling sharing without opening it): name and ids; "In
+  use by" (computer, since when) with a "Disconnect" button (ends the
+  session only; blocking is done by unticking the computer); the access
+  options and allowed-computer list (the user of the device is marked);
+  for unshared devices a share switch (details question still open).
+- A USB device serves one computer at a time. Computers that ask for a
+  busy device wait in a FIFO queue (client state "queued, n-th"; row:
+  "X is using it · 4 computers waiting"; dialog lists the queue).
+- Automatic handover: when someone is waiting and the current user has
+  had no traffic for the idle time, the session ends and the device is
+  reserved for the head of the queue for a few seconds. Never taken away
+  when nobody waits; continuously polling software keeps its device.
+- Defaults by device kind (per-device override in the dialog: default /
+  on / off + seconds; no global settings): storage, HID and others off;
+  licence dongles (known vendors: Thales Sentinel/HASP, WIBU CodeMeter,
+  Feitian/Rockey, Marx, ...) and printers (class 07) on, 30 s. Unknown
+  dongles fall under "others".
+- Decided: a computer that handed a device over rejoins the queue by
+  itself (two idle computers may pass it back and forth; accepted).
+- The device list itself stays as it is (few devices per computer).
+- Sidebar entry "Ağ" was renamed "Ağdaki bilgisayarlar" / "Computers on
+  the network".
+
+### Linux setup help (implemented 2026-09-27)
+- Kernel modules cannot be installed by the packages (kernel-specific
+  names, apt locked during dpkg). Instead: rpm `Recommends:
+  kernel-modules-extra`; deb/rpm post scripts print a hint; the service
+  reports `status.setup_issues` (`kernel_modules_missing` with a
+  distro-specific command from `linux_setup::issues`, retrying modprobe
+  every 30 s) and the app/web UI show it as a banner.
+- Socket permission: the app maps EACCES to `permission_denied` and shows
+  an "allow this user" button (`pkexec usbnexus allow-user USER`: usermod
+  + setfacl on the socket for immediate effect).
+
+### Local certificate trust, tray icon, autostart (implemented 2026-09-27; not yet tried)
+- `web::trust_locally` adds `web-cert.der` to the machine's trusted root
+  store whenever the web interface starts (Windows: `certutil -addstore
+  Root`, macOS: `security add-trusted-cert`; Linux: nothing). New
+  certificates carry `ExplicitNoCa` + serverAuth. `service uninstall`
+  removes it (`untrust_locally`, SHA-1 thumbprint). `WebStatusView::
+  trusted_locally` selects the `gui-web-trusted` / `web-trusted` text.
+- Desktop app: Tauri `tray-icon` (menu "Open"/"Quit", left click opens;
+  menu re-translated by the `set_language` command), closing the window
+  hides it when a tray exists (`HasTray`), `tauri-plugin-single-instance`
+  brings the window back on a second launch, `tauri-plugin-autostart`
+  (`--hidden` argument starts in the tray; window `visible: false` until
+  setup) behind the Settings card `startupCard()` (`autostart_get/set`,
+  app only). Linux packages recommend libayatana-appindicator.
 
 ## Pending end-to-end tests (to run with real hardware)
 

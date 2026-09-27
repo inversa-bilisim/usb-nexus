@@ -52,7 +52,8 @@ pub fn match_locale(spec: &str) -> Option<&'static str> {
 }
 
 /// Picks a language: explicit choice, then `LC_ALL`, `LC_MESSAGES`, `LANG`,
-/// `LANGUAGE`, then the fallback.
+/// `LANGUAGE`, then the operating system's preferred UI languages (on
+/// Windows and macOS these variables are usually unset), then the fallback.
 pub fn detect(explicit: Option<&str>) -> &'static str {
     if let Some(code) = explicit.and_then(match_locale) {
         return code;
@@ -65,7 +66,9 @@ pub fn detect(explicit: Option<&str>) -> &'static str {
             }
         }
     }
-    FALLBACK
+    // In order of preference, e.g. ["fr-FR", "tr-TR", "en-US"]: the first
+    // one we have wins.
+    sys_locale::get_locales().find_map(|l| match_locale(&l)).unwrap_or(FALLBACK)
 }
 
 impl Localizer {
@@ -135,6 +138,36 @@ pub fn templates(code: &str) -> std::collections::BTreeMap<String, String> {
                     out.insert(m.id.name.to_string(), pattern_template(v));
                 }
             }
+        }
+    }
+    out
+}
+
+/// NSIS language of each locale, as named in the Windows installer's
+/// `languages` list (`packaging/windows/tauri.bundle.json`).
+const NSIS_LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("tr", "Turkish")];
+
+/// The Windows installer's own texts (`setup-*` messages) as NSIS
+/// `LangString`s for every language; `packaging/windows/usbnexus-strings.nsh` holds
+/// the output (see the `nsis_strings_are_current` test).
+pub fn nsis_strings() -> String {
+    // NSIS reads source files without a byte order mark as ANSI.
+    let mut out = String::from(
+        "\u{feff}; Generated from locales/*.ftl (setup-* messages); do not edit.\n\
+         ; Regenerate: UPDATE_NSIS_STRINGS=1 cargo test -p usbnexus-i18n\n",
+    );
+    for (code, _, _) in LOCALES {
+        let nsis = NSIS_LANGUAGES.iter().find(|(c, _)| c == code).map(|(_, n)| *n);
+        let Some(nsis) = nsis else { continue };
+        out.push('\n');
+        for (id, text) in templates(code).into_iter().filter(|(id, _)| id.starts_with("setup-")) {
+            let text = text.replace('$', "$$").replace('"', "$\\\"").replace('\n', "$\\r$\\n");
+            out.push_str(&format!(
+                "LangString {} ${{LANG_{}}} \"{}\"\n",
+                id.replace('-', "_"),
+                nsis.to_uppercase(),
+                text
+            ));
         }
     }
     out
@@ -227,6 +260,40 @@ mod tests {
         assert_eq!(t["pin-show"], "Eşleştirme PIN kodu: {pin}");
         assert_eq!(templates("xx")["pin-show"], "Pairing PIN: {pin}");
         assert_eq!(t.len(), templates("en").len());
+    }
+
+    fn repo_file(path: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path)
+    }
+
+    #[test]
+    fn nsis_strings_are_current() {
+        let path = repo_file("packaging/windows/usbnexus-strings.nsh");
+        let want = nsis_strings();
+        if std::env::var_os("UPDATE_NSIS_STRINGS").is_some() {
+            std::fs::write(&path, &want).unwrap();
+        }
+        // Windows checkouts may turn line endings into CRLF.
+        let have = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+        assert!(
+            have == want,
+            "{} is out of date; run: UPDATE_NSIS_STRINGS=1 cargo test -p usbnexus-i18n",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn every_locale_is_in_the_installer() {
+        let bundle = std::fs::read_to_string(repo_file("packaging/windows/tauri.bundle.json")).unwrap();
+        for (code, _, _) in LOCALES {
+            let (_, nsis) = NSIS_LANGUAGES.iter().find(|(c, _)| c == code).unwrap_or_else(|| {
+                panic!("add the NSIS language of {code} to NSIS_LANGUAGES");
+            });
+            assert!(bundle.contains(&format!("\"{nsis}\"")), "add {nsis} to the languages in tauri.bundle.json");
+        }
+        for (id, text) in templates("en").into_iter().filter(|(id, _)| id.starts_with("setup-")) {
+            assert!(!text.contains('{'), "{id}: installer texts cannot have variables");
+        }
     }
 
     #[test]

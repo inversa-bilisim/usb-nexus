@@ -44,7 +44,8 @@ USB Nexus shares USB devices over the network with TLS encryption, PIN \
 pairing, automatic discovery and automatic reconnection. This package \
 contains the usbnexus command line tool and the background service. \
 The kernel's usbip-host and vhci-hcd modules are required (on Ubuntu \
-they are in linux-modules-extra)."""
+they are in linux-modules-extra, which the standard kernel packages \
+already pull in)."""
 depends = "$auto, systemd"
 recommends = "usb-nexus"
 maintainer-scripts = "../../packaging/linux/debian"
@@ -72,3 +73,9 @@ assets = [
 
 [package.metadata.generate-rpm.requires]
 systemd = "*"
+
+# Fedora/RHEL keep the usbip-host and vhci-hcd kernel modules here; dnf
+# installs weak dependencies by default (openSUSE has no such package and
+# ignores it).
+[package.metadata.generate-rpm.recommends]
+kernel-modules-extra = "*"

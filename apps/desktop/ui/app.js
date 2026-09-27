@@ -1062,8 +1062,14 @@ async function exportHistory() {
   }
   // A byte order mark lets spreadsheet programs detect UTF-8.
   const csv = "\ufeff" + lines.map((l) => l.map(csvField).join(",")).join("\r\n") + "\r\n";
+  const name = `usbnexus-history-${new Date().toISOString().slice(0, 10)}.csv`;
+  if (!window.USBNEXUS_WEB) {
+    // The app's webview cannot download; ask where to save instead.
+    if (await invoke("save_file", { name, contents: csv })) toast(t("gui-saved"));
+    return;
+  }
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-  const a = h("a", { href: url, download: `usbnexus-history-${new Date().toISOString().slice(0, 10)}.csv` });
+  const a = h("a", { href: url, download: name });
   document.body.append(a);
   a.click();
   a.remove();

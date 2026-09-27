@@ -205,6 +205,19 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   setup) behind the Settings card `startupCard()` (`autostart_get/set`,
   app only). Linux packages recommend libayatana-appindicator.
 
+### Hotplug robustness (2026-09-27, after the first Windows hotplug test)
+- Symptom: after moving a shared stick to another port the client
+  re-attached by itself but the drive gave errors until detached and
+  attached again by hand. Countermeasures: `SharedExport` withholds a
+  device that appeared after the first listing for `SETTLE_TIME` (3 s;
+  `list()` reports it absent, `export()` answers `no_such_device`), so
+  the server OS finishes enumerating before the device is captured;
+  the client waits `REATTACH_GRACE` (3 s) after a lost connection before
+  attaching again and logs attach/detach at info level. Not yet
+  re-tested on hardware.
+- Desktop app: the webview cannot download, so the history CSV goes
+  through the `save_file` command (tauri-plugin-dialog save dialog).
+
 ## Pending end-to-end tests (to run with real hardware)
 
 1. Linux ↔ Linux with a real USB stick.

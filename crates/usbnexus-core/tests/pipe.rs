@@ -46,3 +46,15 @@ async fn a_client_that_leaves_early_does_not_break_the_pipe() {
         assert_eq!(status.name, "pipe-test");
     }
 }
+
+/// The installer's web port check reads the listener tables.
+#[test]
+fn listening_ports_are_seen() {
+    for addr in ["127.0.0.1:0", "[::1]:0"] {
+        let Ok(listener) = std::net::TcpListener::bind(addr) else { continue };
+        let port = listener.local_addr().unwrap().port();
+        assert!(usbnexus_core::windows::tcp_port_listening(port), "{addr}");
+        drop(listener);
+        assert!(!usbnexus_core::windows::tcp_port_listening(port), "{addr} closed");
+    }
+}

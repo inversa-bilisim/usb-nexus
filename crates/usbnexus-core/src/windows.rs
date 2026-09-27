@@ -148,18 +148,18 @@ fn is_kernel_peer(stream: &TcpStream) -> bool {
     }
 }
 
-/// Owning process of the loopback IPv4 connection `local_port -> remote_port`.
-fn tcp_owner_pid(local_port: u16, remote_port: u16) -> Option<u32> {
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
-    };
-    const AF_INET: u32 = 2;
+const AF_INET: u32 = 2;
+const AF_INET6: u32 = 23;
+
+/// A TCP table from `GetExtendedTcpTable` (u32-aligned bytes).
+fn tcp_table(family: u32, class: windows_sys::Win32::NetworkManagement::IpHelper::TCP_TABLE_CLASS) -> Option<Vec<u32>> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::GetExtendedTcpTable;
     const NO_ERROR: u32 = 0;
     const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
     let mut size: u32 = 0;
     // SAFETY: a null buffer with size 0 asks for the required size.
-    let rc = unsafe { GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) };
+    let rc = unsafe { GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, family, class, 0) };
     if rc != ERROR_INSUFFICIENT_BUFFER && rc != NO_ERROR {
         return None;
     }
@@ -167,21 +167,57 @@ fn tcp_owner_pid(local_port: u16, remote_port: u16) -> Option<u32> {
     let mut buf = vec![0u32; (size as usize + 4096) / 4];
     let mut size = (buf.len() * 4) as u32;
     // SAFETY: `buf` is writable for `size` bytes and suitably aligned.
-    let rc = unsafe { GetExtendedTcpTable(buf.as_mut_ptr().cast(), &mut size, 0, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) };
-    if rc != NO_ERROR {
-        return None;
-    }
+    let rc = unsafe { GetExtendedTcpTable(buf.as_mut_ptr().cast(), &mut size, 0, family, class, 0) };
+    (rc == NO_ERROR).then_some(buf)
+}
+
+fn net_port(p: u32) -> u16 {
+    u16::from_be(p as u16)
+}
+
+/// Owning process of the loopback IPv4 connection `local_port -> remote_port`.
+fn tcp_owner_pid(local_port: u16, remote_port: u16) -> Option<u32> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
+    };
+    let buf = tcp_table(AF_INET, TCP_TABLE_OWNER_PID_ALL)?;
     // SAFETY: the API filled `buf` with a MIB_TCPTABLE_OWNER_PID of
     // `dwNumEntries` rows, which fit in the returned size.
     let rows = unsafe {
         let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
         std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
     };
-    let port = |p: u32| u16::from_be(p as u16);
     let loopback = u32::from_ne_bytes([127, 0, 0, 1]);
     rows.iter()
         .find(|r: &&MIB_TCPROW_OWNER_PID| {
-            r.dwLocalAddr == loopback && port(r.dwLocalPort) == local_port && port(r.dwRemotePort) == remote_port
+            r.dwLocalAddr == loopback
+                && net_port(r.dwLocalPort) == local_port
+                && net_port(r.dwRemotePort) == remote_port
         })
         .map(|r| r.dwOwningPid)
+}
+
+/// Whether any program listens on TCP `port` (IPv4 or IPv6), read from the
+/// system's tables. Unlike trying to listen ourselves, this never makes
+/// Windows Firewall ask the user about the program.
+pub fn tcp_port_listening(port: u16) -> bool {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        MIB_TCP6TABLE_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    };
+    let v4 = tcp_table(AF_INET, TCP_TABLE_OWNER_PID_LISTENER).is_some_and(|buf| {
+        // SAFETY: as in `tcp_owner_pid`.
+        let rows = unsafe {
+            let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+            std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
+        };
+        rows.iter().any(|r| net_port(r.dwLocalPort) == port)
+    });
+    v4 || tcp_table(AF_INET6, TCP_TABLE_OWNER_PID_LISTENER).is_some_and(|buf| {
+        // SAFETY: the API filled `buf` with a MIB_TCP6TABLE_OWNER_PID.
+        let rows = unsafe {
+            let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID);
+            std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
+        };
+        rows.iter().any(|r| net_port(r.dwLocalPort) == port)
+    })
 }

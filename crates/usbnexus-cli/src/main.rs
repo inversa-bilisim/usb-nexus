@@ -834,16 +834,22 @@ fn print_web_status(s: &usbnexus_core::api::WebStatusView) {
     }
 }
 
-/// Whether the web interface could listen on `port`: free on both
-/// loopback and all interfaces, or already ours.
+/// Whether the web interface could listen on `port`: nobody listens on it,
+/// or it is already ours.
 fn check_port(ctx: &Ctx, port: u16) -> Result<()> {
-    use std::net::{Ipv4Addr, TcpListener};
     // The service itself listens on DEFAULT_PORT.
     if port == 0 || port == DEFAULT_PORT {
         bail!("port {port} is reserved");
     }
-    let free = |ip: Ipv4Addr| TcpListener::bind((ip, port)).is_ok();
-    if free(Ipv4Addr::LOCALHOST) && free(Ipv4Addr::UNSPECIFIED) {
+    // Windows: read the listener tables. Listening on all interfaces, even
+    // for a moment, would make Windows Firewall ask about the installer's
+    // copy of this program.
+    #[cfg(windows)]
+    let free = !usbnexus_core::windows::tcp_port_listening(port);
+    // Elsewhere, try to listen (on loopback only).
+    #[cfg(not(windows))]
+    let free = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok();
+    if free {
         return Ok(());
     }
     let web = usbnexus_core::daemon::saved_web(&ctx.dir);

@@ -12,7 +12,15 @@
         "installMode": "perMachine",
         "languages": [
           "English",
-          "Turkish"
+          "Turkish",
+          "German",
+          "Spanish",
+          "French",
+          "Italian",
+          "PortugueseBR",
+          "Russian",
+          "Japanese",
+          "SimpChinese"
         ],
         "displayLanguageSelector": false,
         "installerHooks": "../../../packaging/windows/hooks.nsh",

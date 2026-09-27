@@ -27,9 +27,10 @@ Secure, easy-to-install USB over IP (in development).
 
 ## Languages
 
-The interface is available in **English** and **Turkish**. The language follows the operating
-system (on the command line also `LANG`); `--lang tr` overrides it, and the app has a language box.
-To add a language, copy `locales/en.ftl`, translate it, and add it to `LOCALES` in
+The interface is available in **English, Turkish, German, Spanish, French, Italian, Portuguese
+(Brazil), Russian, Japanese and Simplified Chinese**. The language follows the operating system (on
+the command line also `LANG`); `--lang tr` overrides it, and the app has a language box. To add a
+language, copy `locales/en.ftl`, translate it, and add it to `LOCALES` and `NSIS_LANGUAGES` in
 `crates/usbnexus-i18n/src/lib.rs` and to the Windows installer's language list. The tests fail if
 a translation is incomplete. Installer texts are generated from the same files.
 
@@ -48,6 +49,9 @@ service restart the saved connections are restored.
 
 - **Notification area:** closing the window keeps the app in the notification area (tray); it can
   start automatically at sign-in (Settings → Startup).
+- **What changed:** see [CHANGELOG.md](CHANGELOG.md).
+- **Troubleshooting:** `usbnexus log debug` makes the service log in detail (`service.log` on
+  Windows, the journal on Linux); `usbnexus log info` returns to normal.
 - **Roles:** a computer can be a *server* (shares its USB devices), a *client* (uses devices of other
   computers) or both. The screens of a role a computer does not have are hidden; roles are chosen in
   the Windows installer and can be changed under Settings.
@@ -104,8 +108,9 @@ sudo usbnexus web disable
   (and Linux) see a warning on first use: check the fingerprint shown by `web status`. Typing
   `localhost:3242` without `https://` is redirected.
 - The session cookie is `HttpOnly; Secure; SameSite=Strict`; pages are served with a strict CSP.
-- The web interface's own settings (on/off, network access, port, password) are changed in the
-  desktop app or on the command line of the computer itself, never through the web interface.
+- The web interface's own settings (on/off, network access, port, password) can be changed in the
+  desktop app, on the command line, or in the web interface itself (it warns before a change that
+  would cut the current page off).
 
 ## Building (for developers)
 

@@ -262,6 +262,11 @@ const DEVICE_WAIT: Duration = Duration::from_secs(5);
 /// How often a queued client asks again: well within the server's queue
 /// lifetime and its reservation for the next in line.
 const QUEUE_WAIT: Duration = Duration::from_secs(2);
+/// Pause after a connection was lost while a device was attached, so the
+/// local USB stack has removed the old virtual device (and, after a
+/// hotplug, the server's operating system has finished enumerating the
+/// device) before it is attached again.
+const REATTACH_GRACE: Duration = Duration::from_secs(3);
 
 /// Whether an error cannot be fixed by retrying. A missing device or a
 /// missing permission is not permanent: the device may be plugged in, or
@@ -323,25 +328,32 @@ pub async fn attach_forever(
         wanted.clone_from(&id);
         let (port, local) = backend.attach(&device).await.context("attaching device locally")?;
         backoff.reset();
+        info!(device = %id, busid = %device.busid, port, "device attached");
         events(AttachEvent::Attached { port, device: device.clone(), id });
 
         match relay(stream, local).await {
-            RelayEnd::Local(_) => {
+            RelayEnd::Local(err) => {
+                info!(port, "device detached locally: {}", describe_end(err.as_ref()));
                 events(AttachEvent::Detached);
                 return Ok(());
             }
             RelayEnd::Remote(err) => {
+                info!(port, "connection to the device lost: {}; attaching again", describe_end(err.as_ref()));
                 // Closing our socket already makes the kernel drop the port;
                 // an explicit detach is a best-effort cleanup.
                 let _ = backend.detach(port);
                 let reason = err.map(|e| e.to_string()).unwrap_or_else(|| "connection closed".into());
                 events(AttachEvent::Disconnected { error: crate::api::ApiError::new("connection_lost", reason) });
-                let delay = backoff.next_delay();
+                let delay = backoff.next_delay().max(REATTACH_GRACE);
                 events(AttachEvent::Retrying { delay });
                 tokio::time::sleep(delay).await;
             }
         }
     }
+}
+
+fn describe_end(err: Option<&std::io::Error>) -> String {
+    err.map(|e| e.to_string()).unwrap_or_else(|| "connection closed".into())
 }
 
 /// Finds a device by identity or bus id in a list, for friendlier error messages.

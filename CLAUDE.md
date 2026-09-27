@@ -11,7 +11,9 @@ installers. The GitHub repository is `inversa-bilisim/usb-nexus` (moved from
 - Code comments and docs inside source files are **English**.
 - The user interface must support multiple languages; **Turkish is mandatory**.
   All UI text lives in `locales/*.ftl` (Fluent); `cargo test -p usbnexus-i18n`
-  fails if any locale is missing a message. Never hard-code UI strings.
+  fails if any locale is missing a message. Never hard-code UI strings. A new
+  message must be added to every locale file (en, tr, de, es, fr, it,
+  pt-BR, ru, ja, zh-CN).
 - Never copy GPL-2.0-only code (Linux kernel). Other projects (usbipd-win,
   usbip-win2, VirtualBox headers) may be read for ABI/behaviour only.
 - Hardware testing is postponed; the owner will test everything at the end
@@ -96,8 +98,13 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
 - Installer texts are `setup-*` messages in `locales/*.ftl` (plain text),
   generated into `packaging/windows/usbnexus-strings.nsh`; the web UI
   follows the browser's languages.
-- More languages (e.g. French) will be added later: new `locales/xx.ftl`,
-  `LOCALES`, and the NSIS `languages` list.
+- Languages (2026-09-27): en, tr, de, es, fr, it, pt-BR, ru, ja, zh-CN
+  (`LOCALES` + `NSIS_LANGUAGES` in the i18n crate, `languages` in
+  `packaging/windows/tauri.bundle.json`). `match_locale` matches
+  language-region first, then the language alone (`pt` → `pt-BR`,
+  `zh-TW` → `zh-CN`). Adding one: new `locales/xx.ftl`, the three lists,
+  regenerate `usbnexus-strings.nsh`. The owner decided to stay unsigned for
+  now (SmartScreen note in the Windows README).
 
 ### Role selection in the Windows installer (implemented; not yet tried on Windows)
 - Implementation: `packaging/windows/installer.nsi` is the tauri-cli 2.12.0
@@ -145,8 +152,9 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   `queue`, `kind`, `handover`, `handover_seconds`; `Request::Disconnect`,
   `Request::SetDeviceHandover`. UI: `deviceDialog()` (two columns:
   permissions | status), rows of shared devices are clickable; Settings
-  has a web interface card (`webCard()`, app only; the web UI shows the
-  address and a note).
+  has a web interface card (`webCard()`, also editable from the web UI:
+  confirms before cutting the page off, follows a port change; sessions
+  survive the restart).
 - Clicking a device row on "This computer" opens a details dialog (the row
   switch keeps toggling sharing without opening it): name and ids; "In
   use by" (computer, since when) with a "Disconnect" button (ends the
@@ -196,6 +204,37 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   (`--hidden` argument starts in the tray; window `visible: false` until
   setup) behind the Settings card `startupCard()` (`autostart_get/set`,
   app only). Linux packages recommend libayatana-appindicator.
+
+### Hotplug robustness (2026-09-27, after the first Windows hotplug test)
+- Symptom: after moving a shared stick to another port the client
+  re-attached by itself but the drive gave errors until detached and
+  attached again by hand. Countermeasures: `SharedExport` withholds a
+  device that appeared after the first listing for `SETTLE_TIME` (3 s;
+  `list()` reports it absent, `export()` answers `no_such_device`), so
+  the server OS finishes enumerating before the device is captured;
+  the client waits `REATTACH_GRACE` (3 s) after a lost connection before
+  attaching again and logs attach/detach at info level. Not yet
+  re-tested on hardware.
+- Desktop app: the webview cannot download, so the history CSV goes
+  through the `save_file` command (tauri-plugin-dialog save dialog).
+- Second round (same day, still broken: B showed "Unknown USB Device
+  (Device Descriptor Request Failed)" and disk I/O errors after the
+  automatic re-attach; A had not ended the session when the stick was
+  unplugged, B's connection died without a "connection lost" log line):
+  `Daemon::end_sessions_of_unplugged_devices` (every poll; sessions
+  younger than 5 s are spared) ends the session of a shared device that
+  left the listing, so the port is cleaned up before the device returns.
+  Diagnosis aid: `usbnexus log info|debug|trace` (`Request::SetLogLevel`,
+  config `log_level`, `StatusView::log_level`); the binary installs a
+  reloadable `EnvFilter` (`init_logging`, `LOG_RELOAD`) and the daemon
+  calls the `LogHook`, so the level changes at once and survives restarts.
+
+### Releases
+- `CHANGELOG.md` holds one section per version (English, `---`, Turkish);
+  `release.yml` copies the tagged version's section into the draft
+  release (`name: USB Nexus vX`, pre-release). Tags cannot be pushed from
+  the session's git proxy: run `release.yml` on `main` with the `tag`
+  input instead. Bump `Cargo.toml` and `tauri.conf.json` together.
 
 ## Pending end-to-end tests (to run with real hardware)
 

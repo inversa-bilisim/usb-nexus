@@ -27,11 +27,12 @@ Güvenli, kolay kurulan USB-over-IP çözümü (geliştirme aşamasında).
 
 ## Diller
 
-Arayüz **Türkçe** ve **İngilizce**. Dil işletim sisteminden alınır (komut satırında ayrıca `LANG`);
+Arayüz **Türkçe, İngilizce, Almanca, İspanyolca, Fransızca, İtalyanca, Portekizce (Brezilya), Rusça,
+Japonca ve Basitleştirilmiş Çince**. Dil işletim sisteminden alınır (komut satırında ayrıca `LANG`);
 `--lang tr` ile değiştirilebilir, uygulamada da bir dil kutusu vardır. Yeni bir dil eklemek için
-`locales/en.ftl` dosyasını kopyalayıp çevirin, `crates/usbnexus-i18n/src/lib.rs` içindeki `LOCALES`
-listesine ve Windows kurulumunun dil listesine ekleyin. Eksik çeviri olursa testler başarısız olur.
-Kurulum metinleri de aynı dosyalardan üretilir.
+`locales/en.ftl` dosyasını kopyalayıp çevirin, `crates/usbnexus-i18n/src/lib.rs` içindeki `LOCALES` ve
+`NSIS_LANGUAGES` listelerine ve Windows kurulumunun dil listesine ekleyin. Eksik çeviri olursa testler
+başarısız olur. Kurulum metinleri de aynı dosyalardan üretilir.
 
 ## Masaüstü uygulaması
 
@@ -48,6 +49,9 @@ başladığında kayıtlı bağlantılar kendiliğinden geri kurulur.
 
 - **Bildirim alanı:** Pencere kapatılınca uygulama bildirim alanında (tepside) kalır; oturum açılınca
   kendiliğinden başlayabilir (Ayarlar → Başlangıç).
+- **Neler değişti:** [CHANGELOG.md](CHANGELOG.md) (İngilizce, altında Türkçesi).
+- **Sorun giderme:** `usbnexus log debug` hizmetin ayrıntılı günlük tutmasını sağlar (Windows'ta
+  `service.log`, Linux'ta journal); `usbnexus log info` normale döndürür.
 - **Kullanım şekli (roller):** Bir bilgisayar *sunucu* (USB cihazlarını paylaşır), *istemci* (başka
   bilgisayarların cihazlarını kullanır) ya da ikisi birden olabilir. Seçilmeyen rolün ekranları gizlenir;
   roller Windows kurulumunda seçilir, Ayarlar'dan değiştirilebilir.
@@ -103,8 +107,9 @@ sudo usbnexus web disable
   girişte uyarır; `web status` çıktısındaki parmak iziyle doğrulayın. `https://` yazmadan
   `localhost:3242` yazılırsa yönlendirilir.
 - Oturum çerezi `HttpOnly; Secure; SameSite=Strict`, sayfalar sıkı bir CSP ile sunulur.
-- Web arayüzünün kendi ayarları (açık/kapalı, ağdan erişim, port, parola) masaüstü uygulamasından ya da
-  bilgisayarın kendisinde komut satırından değiştirilir; web arayüzünün içinden değiştirilemez.
+- Web arayüzünün kendi ayarları (açık/kapalı, ağdan erişim, port, parola) masaüstü uygulamasından,
+  komut satırından ya da web arayüzünün kendisinden değiştirilebilir (bu sayfayı erişilemez kılacak bir
+  değişiklikten önce uyarır).
 
 ## Derleme (geliştiriciler için)
 

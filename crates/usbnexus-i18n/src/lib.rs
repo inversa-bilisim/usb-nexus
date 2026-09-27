@@ -21,6 +21,14 @@ use unic_langid::LanguageIdentifier;
 pub const LOCALES: &[(&str, &str, &str)] = &[
     ("en", "English", include_str!("../../../locales/en.ftl")),
     ("tr", "Türkçe", include_str!("../../../locales/tr.ftl")),
+    ("de", "Deutsch", include_str!("../../../locales/de.ftl")),
+    ("es", "Español", include_str!("../../../locales/es.ftl")),
+    ("fr", "Français", include_str!("../../../locales/fr.ftl")),
+    ("it", "Italiano", include_str!("../../../locales/it.ftl")),
+    ("pt-BR", "Português (Brasil)", include_str!("../../../locales/pt-BR.ftl")),
+    ("ru", "Русский", include_str!("../../../locales/ru.ftl")),
+    ("ja", "日本語", include_str!("../../../locales/ja.ftl")),
+    ("zh-CN", "简体中文", include_str!("../../../locales/zh-CN.ftl")),
 ];
 
 pub const FALLBACK: &str = "en";
@@ -45,10 +53,24 @@ fn source(code: &str) -> Option<(&'static str, &'static str)> {
     LOCALES.iter().find(|(c, _, _)| *c == code).map(|(c, _, s)| (*c, *s))
 }
 
-/// Maps a locale string such as `tr_TR.UTF-8`, `tr-TR` or `TR` to a supported code.
+/// Maps a locale string such as `tr_TR.UTF-8`, `tr-TR`, `TR` or `pt_BR` to
+/// a supported code: the exact language-region pair first, then the
+/// language alone (so `pt-PT` gets `pt-BR` and `zh-TW` gets `zh-CN`).
 pub fn match_locale(spec: &str) -> Option<&'static str> {
-    let lang = spec.split(['.', '@']).next()?.split(['_', '-']).next()?.to_ascii_lowercase();
-    LOCALES.iter().map(|(c, _, _)| *c).find(|c| *c == lang)
+    let mut parts = spec.split(['.', '@']).next()?.split(['_', '-']);
+    let lang = parts.next()?.to_ascii_lowercase();
+    let region = parts.next().map(|r| r.to_ascii_uppercase());
+    let codes = LOCALES.iter().map(|(c, _, _)| *c);
+    if let Some(region) = region {
+        let full = format!("{lang}-{region}");
+        if let Some(c) = codes.clone().find(|c| c.eq_ignore_ascii_case(&full)) {
+            return Some(c);
+        }
+    }
+    codes
+        .clone()
+        .find(|c| c.eq_ignore_ascii_case(&lang))
+        .or_else(|| codes.clone().find(|c| c.split('-').next().is_some_and(|l| l.eq_ignore_ascii_case(&lang))))
 }
 
 /// Picks a language: explicit choice, then `LC_ALL`, `LC_MESSAGES`, `LANG`,
@@ -145,7 +167,18 @@ pub fn templates(code: &str) -> std::collections::BTreeMap<String, String> {
 
 /// NSIS language of each locale, as named in the Windows installer's
 /// `languages` list (`packaging/windows/tauri.bundle.json`).
-const NSIS_LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("tr", "Turkish")];
+const NSIS_LANGUAGES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("tr", "Turkish"),
+    ("de", "German"),
+    ("es", "Spanish"),
+    ("fr", "French"),
+    ("it", "Italian"),
+    ("pt-BR", "PortugueseBR"),
+    ("ru", "Russian"),
+    ("ja", "Japanese"),
+    ("zh-CN", "SimpChinese"),
+];
 
 /// The Windows installer's own texts (`setup-*` messages) as NSIS
 /// `LangString`s for every language; `packaging/windows/usbnexus-strings.nsh` holds
@@ -306,7 +339,13 @@ mod tests {
         assert_eq!(match_locale("tr_TR.UTF-8"), Some("tr"));
         assert_eq!(match_locale("TR"), Some("tr"));
         assert_eq!(match_locale("en-US"), Some("en"));
-        assert_eq!(match_locale("de_DE"), None);
+        assert_eq!(match_locale("de_DE"), Some("de"));
+        assert_eq!(match_locale("pt_BR.UTF-8"), Some("pt-BR"));
+        assert_eq!(match_locale("pt-PT"), Some("pt-BR"));
+        assert_eq!(match_locale("pt"), Some("pt-BR"));
+        assert_eq!(match_locale("zh-Hans-CN"), Some("zh-CN"));
+        assert_eq!(match_locale("zh"), Some("zh-CN"));
+        assert_eq!(match_locale("xx_YY"), None);
         assert_eq!(detect(Some("tr")), "tr");
     }
 }

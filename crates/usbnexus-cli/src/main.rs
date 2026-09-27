@@ -121,6 +121,13 @@ enum PolicyArg {
     Restricted,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum LogLevelArg {
+    Info,
+    Debug,
+    Trace,
+}
+
 #[derive(Subcommand)]
 enum WebCmd {
     Enable {
@@ -185,6 +192,11 @@ enum Cmd {
     Policy {
         #[arg(value_enum)]
         policy: Option<PolicyArg>,
+    },
+    /// Show or change how much the service logs.
+    Log {
+        #[arg(value_enum)]
+        level: Option<LogLevelArg>,
     },
     History {
         #[arg(long)]
@@ -295,19 +307,26 @@ fn main() -> ExitCode {
         socket: cli.socket.clone().unwrap_or_else(usbnexus_core::api::default_socket),
     };
 
-    let filter = if cli.verbose { "usbnexus_core=debug,usbnexus=debug" } else { "error" };
-    let env_filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into());
+    let is_daemon = matches!(cli.command, Cmd::Daemon(_) | Cmd::Serve(_));
+    let filter = if cli.verbose {
+        log_filter("debug")
+    } else if is_daemon {
+        log_filter(&usbnexus_core::daemon::saved_log_level(&ctx.dir))
+    } else {
+        "error".to_string()
+    };
+    let env_filter =
+        || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.as_str().into());
     #[cfg(windows)]
     if matches!(cli.command, Cmd::Service { action: ServiceCmd::Run }) {
         // A service has no console: log to a file next to its state.
         let _ = std::fs::create_dir_all(&ctx.dir);
         let file = std::fs::OpenOptions::new().create(true).append(true).open(ctx.dir.join("service.log"));
         if let Ok(file) = file {
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::new("usbnexus_core=info,usbnexus=info"))
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
-                .init();
+            init_logging(
+                env_filter(),
+                tracing_subscriber::fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(file)),
+            );
         }
         // A panic would otherwise go to a console nobody sees and could leave
         // a half-working service behind (e.g. a dead local API task). Log it
@@ -325,7 +344,7 @@ fn main() -> ExitCode {
             }
         };
     }
-    tracing_subscriber::fmt().with_env_filter(env_filter()).with_writer(std::io::stderr).init();
+    init_logging(env_filter(), tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
     let target = match &cli.command {
         Cmd::Pair { server, .. } | Cmd::List { server } | Cmd::Attach { server, .. } => Some(server.clone()),
         _ => None,
@@ -361,6 +380,7 @@ async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Attach { server, device } => attach(ctx, &server, &device).await,
         Cmd::Peers => peers(ctx),
         Cmd::Policy { policy } => policy_cmd(ctx, policy).await,
+        Cmd::Log { level } => log_cmd(ctx, level).await,
         Cmd::History { csv, limit } => history(ctx, csv, limit).await,
         Cmd::Forget { peer } => forget(ctx, &peer),
         Cmd::Api { request } => {
@@ -607,6 +627,7 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
     })
     .await?;
     let demo = opts.demo;
+    d.set_log_hook(Arc::new(apply_log_level));
     #[cfg(target_os = "linux")]
     if !demo {
         d.set_setup_check(Arc::new(linux_setup::issues));
@@ -961,15 +982,9 @@ fn check_port(ctx: &Ctx, port: u16) -> Result<()> {
     if port == 0 || port == DEFAULT_PORT {
         bail!("port {port} is reserved");
     }
-    // Windows: read the listener tables. Listening on all interfaces, even
-    // for a moment, would make Windows Firewall ask about the installer's
-    // copy of this program.
-    #[cfg(windows)]
-    let free = !usbnexus_core::windows::tcp_port_listening(port);
-    // Elsewhere, try to listen (on loopback only).
-    #[cfg(not(windows))]
-    let free = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok();
-    if free {
+    // Same check as the service itself (Windows: listener tables, so the
+    // installer's copy of this program never makes the firewall ask).
+    if usbnexus_core::web::port_available((std::net::Ipv4Addr::LOCALHOST, port).into()) {
         return Ok(());
     }
     let web = usbnexus_core::daemon::saved_web(&ctx.dir);
@@ -1076,6 +1091,57 @@ async fn policy_cmd(ctx: &Ctx, policy: Option<PolicyArg>) -> Result<()> {
         }
     );
     Ok(())
+}
+
+async fn log_cmd(ctx: &Ctx, level: Option<LogLevelArg>) -> Result<()> {
+    use usbnexus_core::api::{self, Request, StatusView};
+    if let Some(level) = level {
+        let level = match level {
+            LogLevelArg::Info => "info",
+            LogLevelArg::Debug => "debug",
+            LogLevelArg::Trace => "trace",
+        };
+        api::call::<()>(&ctx.socket, &Request::SetLogLevel { level: level.into() }).await?;
+    }
+    let status: StatusView = api::call(&ctx.socket, &Request::Status).await?;
+    println!("{}", t!("log-level", level = status.log_level.as_str()));
+    Ok(())
+}
+
+/// The tracing filter for a service log level.
+fn log_filter(level: &str) -> String {
+    format!("usbnexus_core={level},usbnexus={level}")
+}
+
+type LogReload = tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
+
+/// Lets `usbnexus log LEVEL` change the filter of the running daemon.
+static LOG_RELOAD: std::sync::OnceLock<LogReload> = std::sync::OnceLock::new();
+
+/// Installs the global logger with a filter that can be changed later.
+fn init_logging<L>(filter: tracing_subscriber::EnvFilter, output: L)
+where
+    L: tracing_subscriber::Layer<
+            tracing_subscriber::layer::Layered<
+                tracing_subscriber::reload::Layer<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>,
+                tracing_subscriber::Registry,
+            >,
+        > + Send
+        + Sync
+        + 'static,
+{
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let (layer, handle) = tracing_subscriber::reload::Layer::new(filter);
+    tracing_subscriber::registry().with(layer).with(output).init();
+    let _ = LOG_RELOAD.set(handle);
+}
+
+/// Applies a saved or newly chosen log level to the running process.
+fn apply_log_level(level: &str) {
+    if let Some(handle) = LOG_RELOAD.get() {
+        let _ = handle.reload(tracing_subscriber::EnvFilter::new(log_filter(level)));
+    }
 }
 
 async fn history(ctx: &Ctx, csv: bool, limit: usize) -> Result<()> {

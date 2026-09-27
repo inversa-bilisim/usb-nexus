@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -198,7 +199,15 @@ pub struct SharedExport {
     /// thread, lists devices; everything else, often called from async
     /// code, uses this copy.
     connected: Mutex<Option<Vec<LocalDevice>>>,
+    /// When each connected device (bus id, device number) was first
+    /// listed. A device is offered to other computers only after
+    /// [`SETTLE_TIME`], so the operating system has finished enumerating a
+    /// freshly plugged-in device before it is taken away from it.
+    first_seen: Mutex<HashMap<(String, u32), Instant>>,
 }
+
+/// How long a newly plugged-in device stays unavailable to other computers.
+pub const SETTLE_TIME: Duration = Duration::from_secs(3);
 
 struct ShareState {
     shared: Vec<SharedDevice>,
@@ -214,7 +223,19 @@ fn not_shared(what: &str) -> anyhow::Error {
 impl SharedExport {
     pub fn new(host: Arc<dyn DeviceHost>, shared: impl IntoIterator<Item = SharedDevice>, policy: Policy) -> Self {
         let state = ShareState { shared: shared.into_iter().collect(), policy, ports: HashMap::new() };
-        SharedExport { host: std::sync::RwLock::new(host), state: Mutex::new(state), connected: Mutex::new(None) }
+        SharedExport {
+            host: std::sync::RwLock::new(host),
+            state: Mutex::new(state),
+            connected: Mutex::new(None),
+            first_seen: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether `device` has been plugged in long enough to be handed to
+    /// another computer.
+    fn settled(&self, device: &LocalDevice) -> bool {
+        let key = (device.info.busid.clone(), device.info.devnum);
+        self.first_seen.lock().unwrap().get(&key).is_some_and(|t| t.elapsed() >= SETTLE_TIME)
     }
 
     /// Devices of the last listing; lists them now if there was none yet.
@@ -227,6 +248,18 @@ impl SharedExport {
 
     fn list_now(&self) -> Result<Vec<LocalDevice>> {
         let list = self.host().list_all()?;
+        {
+            // Devices found by the very first listing have been plugged in
+            // for a while; only devices appearing later are fresh.
+            let initial = self.connected.lock().unwrap().is_none();
+            let since = if initial { Instant::now() - SETTLE_TIME } else { Instant::now() };
+            let mut seen = self.first_seen.lock().unwrap();
+            let keys: Vec<_> = list.iter().map(|d| (d.info.busid.clone(), d.info.devnum)).collect();
+            seen.retain(|k, _| keys.contains(k));
+            for k in keys {
+                seen.entry(k).or_insert(since);
+            }
+        }
         *self.connected.lock().unwrap() = Some(list.clone());
         Ok(list)
     }
@@ -430,20 +463,30 @@ impl SharedExport {
 }
 
 impl ExportBackend for SharedExport {
+    /// Shared devices; a device plugged in a moment ago is listed as not
+    /// present until it has settled.
     fn list(&self) -> Result<Vec<Offered>> {
-        let (_, resolved) = self.snapshot()?;
+        let (_, mut resolved) = self.snapshot()?;
+        for r in &mut resolved {
+            if r.device.as_ref().is_some_and(|d| !self.settled(d)) {
+                r.device = None;
+            }
+        }
         Ok(self.offered(resolved))
     }
 
     fn export<'a>(&'a self, busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
-        let shared =
-            self.snapshot().map(|(_, r)| r.iter().any(|r| r.device.as_ref().is_some_and(|d| d.info.busid == busid)));
-        match shared {
-            Ok(true) => {
+        let device =
+            self.snapshot().map(|(_, r)| r.into_iter().find_map(|r| r.device.filter(|d| d.info.busid == busid)));
+        match device {
+            Ok(Some(d)) if !self.settled(&d) => Box::pin(async move {
+                Err(crate::api::ApiError::new("no_such_device", format!("{busid} was just plugged in")).into())
+            }),
+            Ok(Some(_)) => {
                 let host = self.host();
                 Box::pin(async move { host.export(busid).await })
             }
-            Ok(false) => Box::pin(async move { Err(not_shared(busid)) }),
+            Ok(None) => Box::pin(async move { Err(not_shared(busid)) }),
             Err(e) => Box::pin(async move { Err(e) }),
         }
     }
@@ -545,6 +588,37 @@ mod tests {
     use crate::access::DeviceMode;
 
     const STICK: &str = "0781:5567:4C530001231120115142";
+
+    /// A device plugged in after the first listing is withheld from other
+    /// computers for SETTLE_TIME.
+    #[test]
+    fn fresh_devices_settle_first() {
+        struct Growing(Mutex<Vec<LocalDevice>>);
+        impl DeviceHost for Growing {
+            fn list_all(&self) -> Result<Vec<LocalDevice>> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            fn export<'a>(&'a self, _busid: &'a str) -> BoxFuture<'a, Result<tokio::net::TcpStream>> {
+                Box::pin(async { anyhow::bail!("not needed") })
+            }
+            fn release(&self, _busid: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        let all = DemoHost.list_all().unwrap();
+        let host = Arc::new(Growing(Mutex::new(vec![all[0].clone()])));
+        let export = SharedExport::new(host.clone(), [], Policy::Open);
+        export.set_shared(STICK, true).unwrap();
+        export.set_shared(&DeviceId::of(&all[1]).to_string(), true).unwrap();
+        assert!(export.list().unwrap()[0].device.is_some(), "present at the first listing");
+        host.0.lock().unwrap().push(all[1].clone());
+        export.refresh().unwrap();
+        let offered = export.list().unwrap();
+        assert!(offered[0].device.is_some());
+        assert!(offered[1].device.is_none(), "just plugged in: not offered yet");
+        export.first_seen.lock().unwrap().values_mut().for_each(|t| *t -= SETTLE_TIME);
+        assert!(export.list().unwrap()[1].device.is_some(), "offered once settled");
+    }
 
     #[test]
     fn sharing_by_identity() {

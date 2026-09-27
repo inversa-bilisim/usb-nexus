@@ -257,6 +257,7 @@ web-password-repeat = Parolayı tekrar girin:
 web-password-mismatch = Parolalar eşleşmiyor.
 web-password-set = Web arayüzü parolası değiştirildi.
 err-weak-password = Parola en az 8 karakter olmalıdır.
+err-port-in-use = Bu port başka bir program tarafından kullanılıyor. Başka bir port seçin.
 err-password-required = Önce bir web arayüzü parolası belirleyin: usbnexus web password
 err-forbidden = Bu yalnızca bilgisayarın kendisinden değiştirilebilir.
 err-not-logged-in = Lütfen yeniden giriş yapın.

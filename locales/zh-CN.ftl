@@ -260,6 +260,7 @@ web-password-repeat = 请再次输入密码：
 web-password-mismatch = 两次输入的密码不一致。
 web-password-set = 网页界面密码已更改。
 err-weak-password = 密码长度必须至少为 8 个字符。
+err-port-in-use = 此端口已被其他程序占用。请选择其他端口。
 err-password-required = 请先设置网页界面密码：usbnexus web password
 err-forbidden = 只能在该计算机本机上更改此设置。
 err-not-logged-in = 请重新登录。

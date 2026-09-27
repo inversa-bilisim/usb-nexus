@@ -171,6 +171,18 @@ async fn sign_in_and_use_the_api() {
     let port = status.port;
     assert_eq!(request(port, "POST", "/api/call", &[CSRF, ("Cookie", &cookie)], call).await.status, 200);
 
+    // A port another program holds is refused before anything is saved.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = format!(r#"{{"cmd":"web_configure","port":{}}}"#, taken.local_addr().unwrap().port());
+    let r = request(port, "POST", "/api/call", &[CSRF, ("Cookie", &cookie)], &busy).await;
+    let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+    assert_eq!(v["error"]["code"], "port_in_use", "{}", r.body);
+    assert_eq!(
+        request(port, "POST", "/api/call", &[CSRF, ("Cookie", &cookie)], call).await.status,
+        200,
+        "still running"
+    );
+
     assert_eq!(request(port, "POST", "/api/logout", &[("Cookie", &cookie)], "").await.status, 204);
     assert_eq!(request(port, "POST", "/api/call", &[CSRF, ("Cookie", &cookie)], call).await.status, 401);
 }

@@ -85,6 +85,28 @@ impl WebSettings {
     }
 }
 
+/// Whether the web interface could listen on `addr`: nobody else holds
+/// the port (0 means any free port). The service port itself
+/// (`crate::DEFAULT_PORT`) is never available.
+pub fn port_available(addr: SocketAddr) -> bool {
+    if addr.port() == 0 {
+        return true;
+    }
+    if addr.port() == crate::DEFAULT_PORT {
+        return false;
+    }
+    // Windows: read the listener tables rather than binding (binding on
+    // all interfaces can make the firewall ask).
+    #[cfg(windows)]
+    {
+        !crate::windows::tcp_port_listening(addr.port())
+    }
+    #[cfg(not(windows))]
+    {
+        std::net::TcpListener::bind(addr).is_ok()
+    }
+}
+
 /// Hashes a new web password.
 pub fn hash_password(password: &str) -> Result<String> {
     use argon2::password_hash::{PasswordHasher, SaltString};

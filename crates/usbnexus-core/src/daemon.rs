@@ -1039,25 +1039,35 @@ impl Daemon {
                     Some(p) => Some(tokio::task::spawn_blocking(move || web::hash_password(&p)).await??),
                     None => None,
                 };
-                {
-                    let mut cfg = inner.config.lock().unwrap();
-                    let w = &mut cfg.web;
-                    if let Some(h) = hash {
-                        w.password_hash = Some(h);
+                let mut new = inner.config.lock().unwrap().web.clone();
+                if let Some(h) = hash {
+                    new.password_hash = Some(h);
+                }
+                if let Some(l) = lan {
+                    new.lan = l;
+                }
+                if let Some(p) = port {
+                    new.port = Some(p);
+                }
+                if let Some(e) = enabled {
+                    if e && new.password_hash.is_none() {
+                        return Err(ApiError::new("password_required", "set a web password first").into());
                     }
-                    if let Some(l) = lan {
-                        w.lan = l;
-                    }
-                    if let Some(p) = port {
-                        w.port = Some(p);
-                    }
-                    if let Some(e) = enabled {
-                        if e && w.password_hash.is_none() {
-                            return Err(ApiError::new("password_required", "set a web password first").into());
-                        }
-                        w.enabled = e;
+                    new.enabled = e;
+                }
+                // Refuse a port another program holds instead of saving a
+                // configuration that cannot start. Our own running
+                // interface on that port does not count.
+                if new.enabled {
+                    let ours = match &*inner.web.lock().await {
+                        Ok(Some(s)) => s.addr.port() == new.port(),
+                        _ => false,
+                    };
+                    if !ours && !web::port_available(new.listen_addr()) {
+                        return Err(ApiError::new("port_in_use", format!("port {} is in use", new.port())).into());
                     }
                 }
+                inner.config.lock().unwrap().web = new;
                 self.save()?;
                 self.restart_web().await;
                 ok(self.web_status().await)

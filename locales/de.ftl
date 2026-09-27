@@ -260,6 +260,7 @@ web-password-repeat = Kennwort wiederholen:
 web-password-mismatch = Die Kennwörter stimmen nicht überein.
 web-password-set = Das Kennwort der Weboberfläche wurde geändert.
 err-weak-password = Das Kennwort muss mindestens 8 Zeichen lang sein.
+err-port-in-use = Dieser Port wird von einem anderen Programm verwendet. Wählen Sie einen anderen Port.
 err-password-required = Legen Sie zuerst ein Kennwort für die Weboberfläche fest: usbnexus web password
 err-forbidden = Dies kann nur auf dem Computer selbst geändert werden.
 err-not-logged-in = Bitte melden Sie sich erneut an.

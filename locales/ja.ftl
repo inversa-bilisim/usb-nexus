@@ -260,6 +260,7 @@ web-password-repeat = パスワードを再入力してください：
 web-password-mismatch = パスワードが一致しません。
 web-password-set = Web インターフェースのパスワードを変更しました。
 err-weak-password = パスワードは 8 文字以上にしてください。
+err-port-in-use = このポートは別のプログラムが使用しています。別のポートを選択してください。
 err-password-required = 先に Web インターフェースのパスワードを設定してください：usbnexus web password
 err-forbidden = これはコンピューター自身からのみ変更できます。
 err-not-logged-in = もう一度サインインしてください。

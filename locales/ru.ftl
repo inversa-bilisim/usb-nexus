@@ -257,6 +257,7 @@ web-password-repeat = Повторите пароль:
 web-password-mismatch = Пароли не совпадают.
 web-password-set = Пароль веб-интерфейса изменён.
 err-weak-password = Пароль должен содержать не менее 8 символов.
+err-port-in-use = Этот порт используется другой программой. Выберите другой порт.
 err-password-required = Сначала задайте пароль веб-интерфейса: usbnexus web password
 err-forbidden = Это можно изменить только на самом компьютере.
 err-not-logged-in = Пожалуйста, войдите ещё раз.

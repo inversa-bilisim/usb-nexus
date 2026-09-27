@@ -260,6 +260,7 @@ web-password-repeat = Répétez le mot de passe :
 web-password-mismatch = Les mots de passe ne correspondent pas.
 web-password-set = Le mot de passe de l'interface web a été changé.
 err-weak-password = Le mot de passe doit contenir au moins 8 caractères.
+err-port-in-use = Ce port est utilisé par un autre programme. Choisissez un autre port.
 err-password-required = Définissez d'abord un mot de passe pour l'interface web : usbnexus web password
 err-forbidden = Cela ne peut être modifié que depuis l'ordinateur lui-même.
 err-not-logged-in = Veuillez vous reconnecter.

@@ -135,6 +135,27 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   completely; Settings has a place to set up the missing role later
   (server → drivers, client → usbip-win2) and the reverse.
 
+### Device details, waiting queue and automatic handover (agreed 2026-09-27; not implemented yet)
+- Clicking a device row on "This computer" opens a details dialog (the row
+  switch keeps toggling sharing without opening it): name and ids; "In
+  use by" (computer, since when) with a "Disconnect" button (ends the
+  session only; blocking is done by unticking the computer); the access
+  options and allowed-computer list (the user of the device is marked);
+  for unshared devices a share switch (details question still open).
+- A USB device serves one computer at a time. Computers that ask for a
+  busy device wait in a FIFO queue (client state "queued, n-th"; row:
+  "X is using it · 4 computers waiting"; dialog lists the queue).
+- Automatic handover: when someone is waiting and the current user has
+  had no traffic for the idle time, the session ends and the device is
+  reserved for the head of the queue for a few seconds. Never taken away
+  when nobody waits; continuously polling software keeps its device.
+- Defaults by device kind (per-device override in the dialog: default /
+  on / off + seconds; no global settings): storage, HID and others off;
+  licence dongles (known vendors: Thales Sentinel/HASP, WIBU CodeMeter,
+  Feitian/Rockey, Marx, ...) and printers (class 07) on, 30 s. Unknown
+  dongles fall under "others".
+- The device list itself stays as it is (few devices per computer).
+
 ## Pending end-to-end tests (to run with real hardware)
 
 1. Linux ↔ Linux with a real USB stick.

@@ -229,6 +229,13 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   reloadable `EnvFilter` (`init_logging`, `LOG_RELOAD`) and the daemon
   calls the `LogHook`, so the level changes at once and survives restarts.
 
+### Releases
+- `CHANGELOG.md` holds one section per version (English, `---`, Turkish);
+  `release.yml` copies the tagged version's section into the draft
+  release (`name: USB Nexus vX`, pre-release). Tags cannot be pushed from
+  the session's git proxy: run `release.yml` on `main` with the `tag`
+  input instead. Bump `Cargo.toml` and `tauri.conf.json` together.
+
 ## Pending end-to-end tests (to run with real hardware)
 
 1. Linux ↔ Linux with a real USB stick.

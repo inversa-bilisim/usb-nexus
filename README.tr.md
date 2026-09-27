@@ -49,6 +49,7 @@ başladığında kayıtlı bağlantılar kendiliğinden geri kurulur.
 
 - **Bildirim alanı:** Pencere kapatılınca uygulama bildirim alanında (tepside) kalır; oturum açılınca
   kendiliğinden başlayabilir (Ayarlar → Başlangıç).
+- **Neler değişti:** [CHANGELOG.md](CHANGELOG.md) (İngilizce, altında Türkçesi).
 - **Sorun giderme:** `usbnexus log debug` hizmetin ayrıntılı günlük tutmasını sağlar (Windows'ta
   `service.log`, Linux'ta journal); `usbnexus log info` normale döndürür.
 - **Kullanım şekli (roller):** Bir bilgisayar *sunucu* (USB cihazlarını paylaşır), *istemci* (başka

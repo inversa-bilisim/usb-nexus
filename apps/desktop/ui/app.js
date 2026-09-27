@@ -315,6 +315,7 @@ async function pageThis() {
           toggle.disabled = true;
           await api("set_shared", { device: d.id, shared: !d.shared });
           await refresh();
+          if (!d.shared) await askWhoMayUse(d.id);
         }),
     });
     let badge;
@@ -742,6 +743,16 @@ function choice(name, value, checked, title, body) {
 function checkedValue(form, name) {
   const el = form.querySelector(`input[name="${name}"]:checked`);
   return el ? el.value : null;
+}
+
+// Right after sharing: if no computer may use the device yet (restricted
+// policy, empty list), ask which ones may, as long as there is a choice.
+async function askWhoMayUse(id) {
+  const shared = (await api("local_devices")).find((x) => x.id === id);
+  if (!shared || !shared.shared || shared.open_to_all) return;
+  if (shared.access && shared.access.allowed && shared.access.allowed.length) return;
+  if (!(await api("peers")).clients.length) return;
+  await accessDialog(shared);
 }
 
 // Who may use one shared device.

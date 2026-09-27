@@ -217,6 +217,17 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   re-tested on hardware.
 - Desktop app: the webview cannot download, so the history CSV goes
   through the `save_file` command (tauri-plugin-dialog save dialog).
+- Second round (same day, still broken: B showed "Unknown USB Device
+  (Device Descriptor Request Failed)" and disk I/O errors after the
+  automatic re-attach; A had not ended the session when the stick was
+  unplugged, B's connection died without a "connection lost" log line):
+  `Daemon::end_sessions_of_unplugged_devices` (every poll; sessions
+  younger than 5 s are spared) ends the session of a shared device that
+  left the listing, so the port is cleaned up before the device returns.
+  Diagnosis aid: `usbnexus log info|debug|trace` (`Request::SetLogLevel`,
+  config `log_level`, `StatusView::log_level`); the binary installs a
+  reloadable `EnvFilter` (`init_logging`, `LOG_RELOAD`) and the daemon
+  calls the `LogHook`, so the level changes at once and survives restarts.
 
 ## Pending end-to-end tests (to run with real hardware)
 

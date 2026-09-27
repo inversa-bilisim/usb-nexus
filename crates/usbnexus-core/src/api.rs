@@ -52,6 +52,11 @@ pub enum Request {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Changes how much the service logs: `info`, `debug` or `trace`.
+    /// Takes effect at once and is kept for the next start.
+    SetLogLevel {
+        level: String,
+    },
     SetUsageRetention {
         days: u32,
     },
@@ -202,7 +207,17 @@ pub struct StatusView {
     /// Whether the policy was chosen explicitly (user interfaces ask on
     /// first run otherwise).
     pub policy_chosen: bool,
+    /// How much the service logs (`info`, `debug`, `trace`).
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
+
+pub fn default_log_level() -> String {
+    "info".into()
+}
+
+/// The log levels the service accepts, least verbose first.
+pub const LOG_LEVELS: [&str; 3] = ["info", "debug", "trace"];
 
 /// Something a role of this computer needs but does not have.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

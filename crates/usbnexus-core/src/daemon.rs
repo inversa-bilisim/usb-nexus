@@ -60,6 +60,9 @@ pub struct DaemonOptions {
 
 /// Reports what the computer still needs for `roles`.
 pub type SetupCheck = Arc<dyn Fn(Roles) -> Vec<SetupIssue> + Send + Sync>;
+/// Applies a new log level to the running process (set by the binary,
+/// which owns the logging setup).
+pub type LogHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Builds the backends for a set of roles, installing what they need first
 /// (drivers); also returns whether that needs a restart of the computer.
@@ -87,6 +90,9 @@ struct Config {
     /// Set by the installer; `None` (older versions): both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     roles: Option<Roles>,
+    /// How much the service logs; `None`: info.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    log_level: Option<String>,
 }
 
 impl Default for Config {
@@ -98,6 +104,7 @@ impl Default for Config {
             web: WebSettings::default(),
             usage_retention_days: DEFAULT_RETENTION_DAYS,
             roles: None,
+            log_level: None,
         }
     }
 }
@@ -137,6 +144,7 @@ struct Inner {
     import: Mutex<Arc<dyn ImportBackend>>,
     backends: Mutex<Option<BackendFactory>>,
     setup_check: Mutex<Option<SetupCheck>>,
+    log_hook: Mutex<Option<LogHook>>,
     reboot_required: std::sync::atomic::AtomicBool,
     attachments: Mutex<HashMap<Key, Slot>>,
     usage: Arc<UsageLog>,
@@ -234,6 +242,15 @@ pub fn saved_roles(state_dir: &Path) -> Roles {
 }
 
 /// Web settings saved in `state_dir`.
+/// The log level saved in `state_dir` (`info` by default), for setting up
+/// logging before the daemon starts.
+pub fn saved_log_level(state_dir: &Path) -> String {
+    read_config(&state_dir.join("config.json"))
+        .ok()
+        .and_then(|c| c.log_level)
+        .unwrap_or_else(crate::api::default_log_level)
+}
+
 pub fn saved_web(state_dir: &Path) -> WebSettings {
     read_config(&state_dir.join("config.json")).map(|c| c.web).unwrap_or_default()
 }
@@ -346,6 +363,7 @@ impl Daemon {
                 import: Mutex::new(opts.import),
                 backends: Mutex::new(None),
                 setup_check: Mutex::new(None),
+                log_hook: Mutex::new(None),
                 reboot_required: Default::default(),
                 attachments: Mutex::new(HashMap::new()),
                 usage,
@@ -387,6 +405,11 @@ impl Daemon {
     /// roles (asked on every status request, so keep it cheap).
     pub fn set_setup_check(&self, check: SetupCheck) {
         *self.inner.setup_check.lock().unwrap() = Some(check);
+    }
+
+    /// Lets `set_log_level` requests change the running process's logging.
+    pub fn set_log_hook(&self, hook: LogHook) {
+        *self.inner.log_hook.lock().unwrap() = Some(hook);
     }
 
     /// Applies new roles: prepares and switches the backends, ends what the
@@ -473,8 +496,9 @@ impl Daemon {
         Ok(())
     }
 
-    /// Looks at the connected devices: remembers names of shared devices and
-    /// migrates bus ids of older configurations.
+    /// Looks at the connected devices: remembers names of shared devices,
+    /// migrates bus ids of older configurations, and ends the sessions of
+    /// devices that were unplugged.
     fn poll_devices(&self) {
         match self.inner.export.refresh() {
             Ok(true) => {
@@ -483,8 +507,38 @@ impl Daemon {
                 }
             }
             Ok(false) => {}
-            Err(e) => debug!("listing devices failed: {e:#}"),
+            Err(e) => {
+                debug!("listing devices failed: {e:#}");
+                return;
+            }
         }
+        self.end_sessions_of_unplugged_devices();
+    }
+
+    /// A device that is no longer plugged in cannot serve its session: end
+    /// it now, so its port is cleaned up before the device comes back
+    /// (possibly elsewhere) and the client asks for it again. Sessions
+    /// younger than a few seconds are left alone: right after a capture
+    /// the device may still be re-enumerating.
+    fn end_sessions_of_unplugged_devices(&self) {
+        const YOUNG: Duration = Duration::from_secs(5);
+        let Ok((_, resolved)) = self.inner.export.snapshot() else { return };
+        let gone: Vec<String> = self
+            .inner
+            .server
+            .sessions()
+            .into_iter()
+            .filter(|(_, s)| s.since.elapsed().map_or(true, |age| age >= YOUNG))
+            .filter(|(id, _)| resolved.iter().any(|r| r.shared.id.to_string() == *id && r.device.is_none()))
+            .map(|(id, _)| id)
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        for id in &gone {
+            tracing::info!(device = %id, "device unplugged; ending its session");
+        }
+        self.inner.server.disconnect(|id, _| gone.iter().any(|g| g == id));
     }
 
     fn spawn_poller(&self) -> JoinHandle<()> {
@@ -818,9 +872,13 @@ impl Daemon {
             Request::Status => {
                 // One lock: a guard taken inside the struct expression lives
                 // until its end, so locking twice there would deadlock.
-                let (roles, policy_chosen) = {
+                let (roles, policy_chosen, log_level) = {
                     let config = inner.config.lock().unwrap();
-                    (config.roles.unwrap_or_default(), config.policy.is_some())
+                    (
+                        config.roles.unwrap_or_default(),
+                        config.policy.is_some(),
+                        config.log_level.clone().unwrap_or_else(crate::api::default_log_level),
+                    )
                 };
                 let check = inner.setup_check.lock().unwrap().clone();
                 let setup_issues = check.map(|c| c(roles)).unwrap_or_default();
@@ -838,6 +896,7 @@ impl Daemon {
                         .map(|(pin, left)| PairingView { pin, remaining_secs: left.as_secs() }),
                     policy: inner.export.policy(),
                     policy_chosen,
+                    log_level,
                 })
             }
             Request::LocalDevices => ok(self.local_devices()?),
@@ -878,6 +937,19 @@ impl Daemon {
                 entries.reverse();
                 entries.truncate(limit.unwrap_or(usize::MAX));
                 ok(UsageView { entries, retention_days: inner.usage.retention_days() })
+            }
+            Request::SetLogLevel { level } => {
+                let level = level.to_ascii_lowercase();
+                if !crate::api::LOG_LEVELS.contains(&level.as_str()) {
+                    return Err(ApiError::new("invalid", format!("unknown log level {level}")).into());
+                }
+                inner.config.lock().unwrap().log_level = Some(level.clone());
+                self.save()?;
+                let hook = inner.log_hook.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook(&level);
+                }
+                ok(())
             }
             Request::SetUsageRetention { days } => {
                 let days = days.clamp(1, 3650);

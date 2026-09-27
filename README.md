@@ -49,6 +49,8 @@ service restart the saved connections are restored.
 
 - **Notification area:** closing the window keeps the app in the notification area (tray); it can
   start automatically at sign-in (Settings → Startup).
+- **Troubleshooting:** `usbnexus log debug` makes the service log in detail (`service.log` on
+  Windows, the journal on Linux); `usbnexus log info` returns to normal.
 - **Roles:** a computer can be a *server* (shares its USB devices), a *client* (uses devices of other
   computers) or both. The screens of a role a computer does not have are hidden; roles are chosen in
   the Windows installer and can be changed under Settings.

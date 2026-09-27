@@ -149,9 +149,10 @@ async function api(cmd, args = {}) {
     }
     return data;
   } catch (err) {
-    if (err && err.code === "service_unavailable") {
-      if (!state.serviceDown) {
+    if (err && (err.code === "service_unavailable" || err.code === "permission_denied")) {
+      if (!state.serviceDown || state.serviceDownReason !== err.code) {
         state.serviceDown = true;
+        state.serviceDownReason = err.code;
         render();
       }
       throw new ServiceDown(err.message);
@@ -1119,7 +1120,36 @@ function rolesForm(current) {
   return form;
 }
 
+// This user may not use the service's socket (Linux: not in the usbnexus
+// group). On Linux a button fixes it through polkit.
+function pageServicePermission() {
+  const grant = h("button", { class: "btn primary" }, t("gui-grant-access"));
+  grant.onclick = () =>
+    act(async () => {
+      grant.disabled = true;
+      try {
+        await invoke("grant_access");
+        toast(t("gui-grant-access-done"));
+        state.serviceDown = false;
+        await refresh();
+      } finally {
+        grant.disabled = false;
+      }
+    });
+  return h(
+    "div",
+    { class: "down" },
+    h("img", { src: "logo.svg", alt: "" }),
+    h("h1", {}, t("gui-service-denied-title")),
+    h("p", {}, t("gui-service-denied-body")),
+    h("p", {}, t("gui-service-denied-command")),
+    h("code", {}, "sudo usbnexus allow-user " + t("gui-service-denied-user")),
+    h("div", {}, state.os === "linux" ? grant : null, " ", h("button", { class: "btn", onclick: () => refresh() }, t("gui-retry"))),
+  );
+}
+
 function pageServiceDown() {
+  if (state.serviceDownReason === "permission_denied") return pageServicePermission();
   return h(
     "div",
     { class: "down" },
@@ -1135,6 +1165,18 @@ function pageServiceDown() {
           ]
         : [h("p", {}, t("gui-service-down-linux")), h("code", {}, "sudo systemctl start usbnexus")]),
     h("div", {}, h("button", { class: "btn primary", onclick: () => refresh() }, t("gui-retry"))),
+  );
+}
+
+// Something a role still needs on this computer (e.g. kernel modules).
+function setupBanner(issue) {
+  if (issue.code !== "kernel_modules_missing") return null;
+  return h(
+    "div",
+    { class: "banner" },
+    t("gui-setup-kernel-modules", { modules: issue.detail }),
+    " ",
+    issue.command ? h("code", {}, issue.command) : t("gui-setup-kernel-modules-nocmd"),
   );
 }
 
@@ -1165,7 +1207,8 @@ async function render() {
     const content = await PAGES[state.view]();
     if (seq !== renderSeq) return; // a newer render started meanwhile
     const reboot = state.status && state.status.reboot_required ? h("div", { class: "banner" }, t("gui-reboot-required")) : null;
-    main.replaceChildren(h("div", { class: "page" }, reboot, content));
+    const issues = ((state.status && state.status.setup_issues) || []).map(setupBanner);
+    main.replaceChildren(h("div", { class: "page" }, reboot, issues, content));
   } catch (err) {
     if (err instanceof ServiceDown || seq !== renderSeq) return;
     main.replaceChildren(h("div", { class: "page" }, h("div", { class: "list" }, h("div", { class: "empty" }, errorText(err)))));

@@ -26,7 +26,7 @@ use tracing::{debug, warn};
 use crate::access::{DeviceAccess, Policy};
 use crate::api::{
     ApiError, AttachState, AttachmentView, DiscoveredView, LocalDeviceView, PairingView, PeersView, RemoteDeviceView,
-    Request, Response, Roles, StatusView, UsageView, WebStatusView,
+    Request, Response, Roles, SetupIssue, StatusView, UsageView, WebStatusView,
 };
 use crate::backend::{DeviceHost, ImportBackend, SharedDevice, SharedExport};
 use crate::client::{self, AttachEvent, ClientConfig, Target};
@@ -56,6 +56,9 @@ pub struct DaemonOptions {
     /// Optional observer of server activity (pairings, exports).
     pub events: Option<Arc<dyn Fn(ServerEvent) + Send + Sync>>,
 }
+
+/// Reports what the computer still needs for `roles`.
+pub type SetupCheck = Arc<dyn Fn(Roles) -> Vec<SetupIssue> + Send + Sync>;
 
 /// Builds the backends for a set of roles, installing what they need first
 /// (drivers); also returns whether that needs a restart of the computer.
@@ -132,6 +135,7 @@ struct Inner {
     /// Replaced when the roles change (see [`BackendFactory`]).
     import: Mutex<Arc<dyn ImportBackend>>,
     backends: Mutex<Option<BackendFactory>>,
+    setup_check: Mutex<Option<SetupCheck>>,
     reboot_required: std::sync::atomic::AtomicBool,
     attachments: Mutex<HashMap<Key, Slot>>,
     usage: Arc<UsageLog>,
@@ -340,6 +344,7 @@ impl Daemon {
                 clients,
                 import: Mutex::new(opts.import),
                 backends: Mutex::new(None),
+                setup_check: Mutex::new(None),
                 reboot_required: Default::default(),
                 attachments: Mutex::new(HashMap::new()),
                 usage,
@@ -375,6 +380,12 @@ impl Daemon {
     /// `set_roles` only records them.
     pub fn set_backend_factory(&self, factory: BackendFactory) {
         *self.inner.backends.lock().unwrap() = Some(factory);
+    }
+
+    /// Lets the service report what the computer still needs for its
+    /// roles (asked on every status request, so keep it cheap).
+    pub fn set_setup_check(&self, check: SetupCheck) {
+        *self.inner.setup_check.lock().unwrap() = Some(check);
     }
 
     /// Applies new roles: prepares and switches the backends, ends what the
@@ -751,10 +762,13 @@ impl Daemon {
                     let config = inner.config.lock().unwrap();
                     (config.roles.unwrap_or_default(), config.policy.is_some())
                 };
+                let check = inner.setup_check.lock().unwrap().clone();
+                let setup_issues = check.map(|c| c(roles)).unwrap_or_default();
                 ok(StatusView {
                     name: inner.name.clone(),
                     roles,
                     reboot_required: inner.reboot_required.load(std::sync::atomic::Ordering::Relaxed),
+                    setup_issues,
                     fingerprint: inner.fingerprint.clone(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     listen: inner.listen.clone(),

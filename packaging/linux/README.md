@@ -7,16 +7,19 @@
 | `usbnexus` | `/usr/bin/usbnexus`, systemd hizmeti, `usbnexus` grubu. Ekransız sunucular için tek başına yeterli. |
 | `usb-nexus` | Masaüstü uygulaması (`usbnexus-desktop`); `usbnexus` paketine bağımlıdır. |
 
-Kurulum hizmeti etkinleştirip başlatır. Masaüstü uygulamasını kullanacak kişiyi gruba ekleyin ve oturumu
-yeniden açın:
+Kurulum hizmeti etkinleştirip başlatır:
 
 ```sh
 sudo apt install ./usbnexus_*.deb ./usb-nexus_*.deb      # veya: sudo dnf install ./usbnexus-*.rpm ./USB*.rpm
-sudo usermod -aG usbnexus "$USER"
 ```
 
-Çekirdek modülleri `usbip-host` ve `vhci-hcd` gereklidir (Ubuntu'da `linux-modules-extra-$(uname -r)` paketinde).
-Hizmet başlarken bunları kendisi yükler.
+- **Kullanıcı izni:** Masaüstü uygulaması hizmeti yalnızca `usbnexus` grubundaki kullanıcılar için
+  yönetebilir. Uygulama ilk açılışta izin yoksa **“Bu kullanıcıya izin ver”** düğmesi gösterir (yönetici
+  parolası sorar, hemen geçerli olur). Elle: `sudo usbnexus allow-user KULLANICI`.
+- **Çekirdek modülleri:** `usbip-host` ve `vhci-hcd` çoğu dağıtımda çekirdekle gelir; hizmet onları
+  kendisi yükler. Eksiklerse (Ubuntu bulut çekirdekleri: `linux-modules-extra-$(uname -r)`; Fedora/RHEL:
+  `kernel-modules-extra`, RPM paketi bunu önerilen bağımlılık olarak kurar) uygulama ve web arayüzü
+  kurulacak paketi gösterir.
 
 ## Paket üretme
 

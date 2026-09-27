@@ -160,6 +160,17 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
 - Sidebar entry "Ağ" was renamed "Ağdaki bilgisayarlar" / "Computers on
   the network".
 
+### Linux setup help (implemented 2026-09-27)
+- Kernel modules cannot be installed by the packages (kernel-specific
+  names, apt locked during dpkg). Instead: rpm `Recommends:
+  kernel-modules-extra`; deb/rpm post scripts print a hint; the service
+  reports `status.setup_issues` (`kernel_modules_missing` with a
+  distro-specific command from `linux_setup::issues`, retrying modprobe
+  every 30 s) and the app/web UI show it as a banner.
+- Socket permission: the app maps EACCES to `permission_denied` and shows
+  an "allow this user" button (`pkexec usbnexus allow-user USER`: usermod
+  + setfacl on the socket for immediate effect).
+
 ## Pending end-to-end tests (to run with real hardware)
 
 1. Linux ↔ Linux with a real USB stick.

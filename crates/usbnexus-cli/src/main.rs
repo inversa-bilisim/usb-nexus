@@ -160,6 +160,11 @@ enum Cmd {
         seconds: u64,
     },
     Local,
+    /// Lets a user control the service from the desktop app (Linux).
+    #[cfg(target_os = "linux")]
+    AllowUser {
+        user: String,
+    },
     Discover {
         #[arg(long, default_value_t = 3)]
         timeout: u64,
@@ -348,6 +353,8 @@ async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Service { action: ServiceCmd::Run } => unreachable!("handled in main"),
         Cmd::Pin { seconds } => pin(ctx, seconds).await,
         Cmd::Local => local(),
+        #[cfg(target_os = "linux")]
+        Cmd::AllowUser { user } => allow_user(ctx, &user),
         Cmd::Discover { timeout } => discover(ctx, timeout).await,
         Cmd::Pair { server, pin } => pair(ctx, &server, pin).await,
         Cmd::List { server } => list(ctx, &server).await,
@@ -384,6 +391,105 @@ async fn shutdown_signal() {
 fn require_root() -> Result<()> {
     if cfg!(target_os = "linux") && !is_root() {
         bail!(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "root required"));
+    }
+    Ok(())
+}
+
+/// Linux: the usbip kernel modules each role needs, and how to get them.
+#[cfg(target_os = "linux")]
+mod linux_setup {
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use usbnexus_core::api::{Roles, SetupIssue};
+
+    /// Loading is retried this often while a module is missing.
+    const MODPROBE_INTERVAL: Duration = Duration::from_secs(30);
+
+    fn loaded(module: &str) -> bool {
+        match module {
+            "usbip-host" => Path::new("/sys/bus/usb/drivers/usbip-host").is_dir(),
+            "vhci-hcd" => Path::new("/sys/devices/platform/vhci_hcd.0").is_dir(),
+            _ => false,
+        }
+    }
+
+    /// The command that installs the modules on this distribution, if known.
+    fn install_command() -> Option<String> {
+        let os = std::fs::read_to_string("/etc/os-release").ok()?;
+        let field = |name: &str| {
+            os.lines()
+                .find_map(|l| l.strip_prefix(name)?.strip_prefix('='))
+                .map(|v| v.trim_matches('"').to_lowercase())
+                .unwrap_or_default()
+        };
+        let ids = format!("{} {}", field("ID"), field("ID_LIKE"));
+        if ids.contains("ubuntu") {
+            let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
+            return Some(format!("sudo apt install linux-modules-extra-{}", kernel.trim()));
+        }
+        if ["fedora", "rhel", "centos", "rocky", "almalinux"].iter().any(|d| ids.contains(d)) {
+            return Some("sudo dnf install kernel-modules-extra".to_string());
+        }
+        None
+    }
+
+    pub fn issues(roles: Roles) -> Vec<SetupIssue> {
+        static LAST_TRY: Mutex<Option<Instant>> = Mutex::new(None);
+        let wanted: Vec<&str> = [(roles.server, "usbip-host"), (roles.client, "vhci-hcd")]
+            .into_iter()
+            .filter_map(|(on, m)| on.then_some(m))
+            .collect();
+        let mut missing: Vec<&str> = wanted.iter().copied().filter(|m| !loaded(m)).collect();
+        if !missing.is_empty() {
+            // Installed since the service started? Try loading again.
+            let mut last = LAST_TRY.lock().unwrap();
+            if last.map_or(true, |t| t.elapsed() >= MODPROBE_INTERVAL) {
+                *last = Some(Instant::now());
+                for m in &missing {
+                    let _ = std::process::Command::new("modprobe").arg(m).output();
+                }
+                missing.retain(|m| !loaded(m));
+            }
+        }
+        if missing.is_empty() {
+            return vec![];
+        }
+        vec![SetupIssue {
+            code: "kernel_modules_missing".into(),
+            detail: missing.join(", "),
+            command: install_command(),
+        }]
+    }
+}
+
+/// Adds `user` to the `usbnexus` group so the desktop app may control the
+/// service, and grants access to the running service's socket right away
+/// (group membership only applies to new sessions).
+#[cfg(target_os = "linux")]
+fn allow_user(ctx: &Ctx, user: &str) -> Result<()> {
+    require_root()?;
+    if user.is_empty() || !user.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+        bail!(t!("allow-user-invalid", user = user));
+    }
+    let status =
+        std::process::Command::new("usermod").args(["-aG", "usbnexus", user]).status().context("running usermod")?;
+    if !status.success() {
+        bail!(t!("allow-user-failed", user = user));
+    }
+    let socket = &ctx.socket;
+    let now = socket.exists()
+        && std::process::Command::new("setfacl")
+            .arg("-m")
+            .arg(format!("u:{user}:rw"))
+            .arg(socket)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    println!("{}", t!("allow-user-done", user = user));
+    if !now {
+        println!("{}", t!("allow-user-relogin"));
     }
     Ok(())
 }
@@ -501,6 +607,10 @@ async fn run_daemon(ctx: &Ctx, opts: ServeOpts, stop: impl std::future::Future<O
     })
     .await?;
     let demo = opts.demo;
+    #[cfg(target_os = "linux")]
+    if !demo {
+        d.set_setup_check(Arc::new(linux_setup::issues));
+    }
     d.set_backend_factory(Arc::new(move |roles| {
         // Install what the new roles need (drivers) before using them.
         #[cfg(windows)]

@@ -84,9 +84,10 @@ sudo usbnexus web disable
 - Oturum çerezi `HttpOnly; Secure; SameSite=Strict`, sayfalar sıkı bir CSP ile sunulur.
 - Web arayüzünün kendi ayarları yalnızca bilgisayarın kendisinden (komut satırı) değiştirilebilir.
 
-## Derleme
+## Derleme (geliştiriciler için)
 
-Linux'ta masaüstü uygulaması için önce sistem kütüphaneleri gerekir:
+Kurulum paketlerini kullananların bu bölümle işi yok; paketler gereken kütüphaneleri kendileri
+kurar. Kaynak koddan derlemek için Linux'ta önce sistem kütüphaneleri gerekir:
 
 ```sh
 sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
@@ -97,19 +98,20 @@ cargo build --release      # çıktılar: target/release/usbnexus, target/releas
 cargo test --workspace
 ```
 
-## Kullanım (Linux, ilk sürüm)
+## Komut satırından kullanım (Linux)
 
-Her iki bilgisayarda çekirdek modüllerini yükleyin ve komutları `sudo` ile çalıştırın:
+Paketle kurulan hizmet çekirdek modüllerini (`usbip-host`, `vhci-hcd`) kendisi yükler; eksiklerse
+masaüstü ve web arayüzü kurulacak paketi söyler. Hizmet olmadan, elle denemek için:
 
 ```sh
 # Sunucu (USB cihazının takılı olduğu bilgisayar)
-sudo modprobe usbip-host
+sudo modprobe usbip-host                    # yalnızca hizmet çalışmıyorsa
 sudo usbnexus local                         # paylaşılabilecek cihazları listeler
 sudo usbnexus serve --export 1-2 --pair     # 1-2 cihazını paylaşır, PIN gösterir
 sudo usbnexus pin                           # (çalışan sunucu için) yeni PIN üretir
 
 # İstemci (cihazı kullanacak bilgisayar)
-sudo modprobe vhci-hcd
+sudo modprobe vhci-hcd                      # yalnızca hizmet çalışmıyorsa
 sudo usbnexus discover                      # ağdaki sunucuları bulur
 sudo usbnexus pair ofis-pc                  # PIN sorar ve eşleştirir (bir kez)
 sudo usbnexus list ofis-pc                  # paylaşılan cihazları listeler

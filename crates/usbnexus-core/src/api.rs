@@ -178,6 +178,9 @@ pub struct StatusView {
     /// Something installed for a role needs a restart of the computer.
     #[serde(default)]
     pub reboot_required: bool,
+    /// What this computer still needs for its roles (e.g. kernel modules).
+    #[serde(default)]
+    pub setup_issues: Vec<SetupIssue>,
     pub fingerprint: String,
     pub version: String,
     pub listen: String,
@@ -187,6 +190,17 @@ pub struct StatusView {
     /// Whether the policy was chosen explicitly (user interfaces ask on
     /// first run otherwise).
     pub policy_chosen: bool,
+}
+
+/// Something a role of this computer needs but does not have.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetupIssue {
+    /// `kernel_modules_missing`: `detail` lists the modules.
+    pub code: String,
+    pub detail: String,
+    /// A command that fixes it on this system, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// What a computer is set up for. Both by default (and for configurations

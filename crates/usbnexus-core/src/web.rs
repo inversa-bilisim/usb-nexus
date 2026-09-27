@@ -193,6 +193,7 @@ pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSett
         .await
         .with_context(|| format!("listening on {}", settings.listen_addr()))?;
     let addr = listener.local_addr()?;
+    let port = addr.port();
     let acceptor = TlsAcceptor::from(tls_config(id)?);
     let state = Arc::new(WebState {
         daemon,
@@ -204,9 +205,25 @@ pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSett
     let app = router(state);
     let task = tokio::spawn(async move {
         loop {
-            let Ok((tcp, peer)) = listener.accept().await else { continue };
+            let Ok((tcp, peer)) = listener.accept().await else {
+                // Out of sockets or similar: do not spin.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            };
             let (acceptor, app) = (acceptor.clone(), app.clone());
             tokio::spawn(async move {
+                // A TLS connection starts with a handshake record (0x16);
+                // anything else is most likely plain HTTP typed without
+                // "https://", which is sent to the right address.
+                let mut first = [0u8; 1];
+                match tokio::time::timeout(Duration::from_secs(10), tcp.peek(&mut first)).await {
+                    Ok(Ok(1..)) if first[0] == 0x16 => {}
+                    Ok(Ok(1..)) => {
+                        let _ = redirect_to_https(tcp, port).await;
+                        return;
+                    }
+                    _ => return,
+                }
                 let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await else {
                     return;
                 };
@@ -216,6 +233,39 @@ pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSett
         }
     });
     Ok(WebServer { task: Some(task), addr, fingerprint: fingerprint(&id.cert_der) })
+}
+
+/// Answers a plain HTTP request on the HTTPS port with a redirect to the
+/// same host over HTTPS.
+async fn redirect_to_https(mut tcp: tokio::net::TcpStream, port: u16) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let read_head = async {
+        while buf.len() < 8192 && !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = tcp.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok::<_, std::io::Error>(())
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(5), read_head).await;
+    let head = String::from_utf8_lossy(&buf);
+    // Only a plain host name or address (with port) goes into the header.
+    let host = head
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)))
+        .unwrap_or_else(|| format!("localhost:{port}"));
+    let reply = format!(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: https://{host}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    tcp.write_all(reply.as_bytes()).await?;
+    tcp.shutdown().await
 }
 
 fn router(state: Arc<WebState>) -> Router {

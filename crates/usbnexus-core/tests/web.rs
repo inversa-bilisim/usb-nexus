@@ -203,3 +203,27 @@ async fn disabling_stops_the_server_and_passwords_are_required() {
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test]
+async fn plain_http_is_redirected_to_https() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (_d, port, _dir) = start().await;
+    let plain = |host: String| async move {
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        s.write_all(format!("GET /x HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        s.read_to_string(&mut reply).await.unwrap();
+        reply
+    };
+    let reply = plain(format!("localhost:{port}")).await;
+    assert!(reply.starts_with("HTTP/1.1 301"), "{reply}");
+    assert!(reply.contains(&format!("Location: https://localhost:{port}/\r\n")), "{reply}");
+    // A header line cannot be smuggled in through the Host header.
+    let reply = plain("evil\r\nSet-Cookie: x=1".into()).await;
+    assert!(reply.contains("Location: https://evil/\r\n"), "{reply}");
+    assert!(!reply.contains("Set-Cookie"), "{reply}");
+    let reply = plain("bad host<script>".into()).await;
+    assert!(reply.contains(&format!("Location: https://localhost:{port}/\r\n")), "{reply}");
+    // HTTPS still works on the same port.
+    assert_eq!(request(port, "GET", "/", &[], "").await.status, 200);
+}

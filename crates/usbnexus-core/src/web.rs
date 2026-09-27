@@ -103,7 +103,12 @@ pub fn port_available(addr: SocketAddr) -> bool {
     }
     #[cfg(not(windows))]
     {
-        std::net::TcpListener::bind(addr).is_ok()
+        // Probe the wildcard and the loopback address, not just `addr`:
+        // BSD systems (macOS) let a wildcard bind succeed next to a
+        // specific one, so a program listening on 127.0.0.1 would go
+        // unnoticed with a single probe (and the other way round).
+        use std::net::{Ipv4Addr, TcpListener};
+        [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST].into_iter().all(|ip| TcpListener::bind((ip, addr.port())).is_ok())
     }
 }
 

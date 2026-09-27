@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::access::{DeviceAccess, DeviceMode, Policy};
 use crate::client::ClientError;
 use crate::control::RemoteError;
+use crate::handover::{DeviceKind, Handover, HandoverMode};
 use crate::trust::Peer;
 use crate::usage::UsageEntry;
 
@@ -86,6 +87,17 @@ pub enum Request {
         fingerprint: String,
     },
     WebStatus,
+    /// Ends the current use of a shared device (the client may ask again).
+    Disconnect {
+        device: String,
+    },
+    /// Changes when a shared device is handed to the next waiting computer.
+    SetDeviceHandover {
+        device: String,
+        mode: HandoverMode,
+        #[serde(default)]
+        seconds: Option<u32>,
+    },
     /// Changes what this computer is set up for, installing what the new
     /// roles need (drivers) first. At least one role must remain.
     SetRoles {
@@ -242,6 +254,30 @@ pub struct LocalDeviceView {
     pub open_to_all: bool,
     /// Name of the client currently using the device.
     pub used_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_by_fingerprint: Option<String>,
+    /// When the current use started (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_since: Option<u64>,
+    /// Computers waiting for the device, first in line first.
+    #[serde(default)]
+    pub queue: Vec<QueueEntry>,
+    /// What kind of device it is (while plugged in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<DeviceKind>,
+    /// The automatic handover setting of a shared device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handover: Option<Handover>,
+    /// Idle seconds after which the device goes to the next computer, as
+    /// currently in effect (`None`: it stays with its user).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handover_seconds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueEntry {
+    pub name: String,
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

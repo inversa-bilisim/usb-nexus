@@ -23,15 +23,16 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::access::{DeviceAccess, Policy};
+use crate::access::Policy;
 use crate::api::{
-    ApiError, AttachState, AttachmentView, DiscoveredView, LocalDeviceView, PairingView, PeersView, RemoteDeviceView,
-    Request, Response, Roles, SetupIssue, StatusView, UsageView, WebStatusView,
+    ApiError, AttachState, AttachmentView, DiscoveredView, LocalDeviceView, PairingView, PeersView, QueueEntry,
+    RemoteDeviceView, Request, Response, Roles, SetupIssue, StatusView, UsageView, WebStatusView,
 };
 use crate::backend::{DeviceHost, ImportBackend, SharedDevice, SharedExport};
 use crate::client::{self, AttachEvent, ClientConfig, Target};
 use crate::device_id::DeviceId;
 use crate::discovery;
+use crate::handover::{DeviceKind, Handover};
 use crate::identity::Identity;
 use crate::server::{DeviceUse, Server, ServerConfig, ServerEvent};
 use crate::trust::TrustStore;
@@ -692,20 +693,46 @@ impl Daemon {
     fn local_devices(&self) -> Result<Vec<LocalDeviceView>> {
         let inner = &self.inner;
         let (connected, resolved) = inner.export.snapshot()?;
-        let in_use = inner.server.in_use();
+        let sessions = inner.server.sessions();
         let policy = inner.export.policy();
-        let shared_view = |id: &DeviceId, access: Option<&DeviceAccess>| {
+        // Sharing state of one device: access, whether everyone may use it,
+        // who does (and since when) and who waits.
+        let shared_view = |id: &DeviceId, shared: Option<&SharedDevice>, kind: Option<DeviceKind>| {
+            let key = id.to_string();
+            let session = sessions.get(&key);
+            let queue = if shared.is_some() {
+                inner
+                    .server
+                    .queue(&key)
+                    .into_iter()
+                    .map(|(name, fingerprint)| QueueEntry { name, fingerprint })
+                    .collect()
+            } else {
+                vec![]
+            };
+            let handover = shared.map(|s| s.handover);
+            let handover_seconds = match (handover, kind) {
+                (Some(h), Some(k)) => h.idle_time(k).map(|d| d.as_secs() as u32),
+                _ => None,
+            };
             (
-                access.cloned(),
-                access.is_some_and(|a| a.is_open(policy)),
-                in_use.get(&id.to_string()).map(|u| u.0.clone()),
+                shared.map(|s| s.access.clone()),
+                shared.is_some_and(|s| s.access.is_open(policy)),
+                session.map(|s| s.client.clone()),
+                session.map(|s| s.fingerprint.clone()),
+                session.and_then(|s| s.since.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
+                queue,
+                handover,
+                handover_seconds,
             )
         };
         let mut out = vec![];
         for d in &connected {
             let entry = resolved.iter().find(|r| r.device.as_ref() == Some(d)).map(|r| &r.shared);
             let id = entry.map(|e| e.id.clone()).unwrap_or_else(|| DeviceId::of(d));
-            let (access, open_to_all, used_by) = shared_view(&id, entry.map(|e| &e.access));
+            let kind = DeviceKind::of(d);
+            let (access, open_to_all, used_by, used_by_fingerprint, used_since, queue, handover, handover_seconds) =
+                shared_view(&id, entry, Some(kind));
             out.push(LocalDeviceView {
                 id: id.to_string(),
                 busid: Some(d.info.busid.clone()),
@@ -720,12 +747,19 @@ impl Daemon {
                 access,
                 open_to_all,
                 used_by,
+                used_by_fingerprint,
+                used_since,
+                queue,
+                kind: Some(kind),
+                handover,
+                handover_seconds,
             });
         }
         for r in resolved.iter().filter(|r| r.device.is_none()) {
             let s = &r.shared;
             let (vendor_id, product_id) = s.id.ids().unwrap_or_default();
-            let (access, open_to_all, used_by) = shared_view(&s.id, Some(&s.access));
+            let (access, open_to_all, used_by, used_by_fingerprint, used_since, queue, handover, handover_seconds) =
+                shared_view(&s.id, Some(s), None);
             out.push(LocalDeviceView {
                 id: s.id.to_string(),
                 busid: None,
@@ -740,6 +774,12 @@ impl Daemon {
                 access,
                 open_to_all,
                 used_by,
+                used_by_fingerprint,
+                used_since,
+                queue,
+                kind: None,
+                handover,
+                handover_seconds,
             });
         }
         Ok(out)
@@ -960,6 +1000,16 @@ impl Daemon {
                 ok(())
             }
             Request::WebStatus => ok(self.web_status().await),
+            Request::Disconnect { device } => {
+                let wanted = DeviceId::parse(&device);
+                let n = inner.server.disconnect(|id, _| DeviceId::parse(id) == wanted);
+                ok(serde_json::json!({ "disconnected": n }))
+            }
+            Request::SetDeviceHandover { device, mode, seconds } => {
+                inner.export.set_handover(&device, Handover { mode, seconds })?;
+                self.shares_changed()?;
+                ok(())
+            }
             Request::SetRoles { server, client } => {
                 let reboot_required = self.set_roles(Roles { server, client }).await?;
                 ok(serde_json::json!({ "reboot_required": reboot_required }))

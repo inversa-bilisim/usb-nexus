@@ -106,6 +106,40 @@ async fn share_pair_attach_restore_detach() {
     let remote: Vec<RemoteDeviceView> = call(&b, Request::RemoteDevices { server: server_fp.clone() }).await;
     assert!(remote[0].in_use && remote[0].attached_here);
 
+    // Details for the dialog: who, since when, kind, handover setting.
+    let dev = local.iter().find(|d| d.id == id).unwrap().clone();
+    assert_eq!(dev.used_by_fingerprint.as_deref(), Some(peers_a.clients[0].fingerprint.as_str()));
+    assert!(dev.used_since.is_some_and(|t| t > 0));
+    assert!(dev.queue.is_empty());
+    assert_eq!(dev.kind, Some(usbnexus_core::handover::DeviceKind::Storage));
+    assert_eq!(dev.handover_seconds, None, "storage: no automatic handover by default");
+    let _: () = call(
+        &a,
+        Request::SetDeviceHandover {
+            device: id.clone(),
+            mode: usbnexus_core::handover::HandoverMode::On,
+            seconds: Some(5),
+        },
+    )
+    .await;
+    let local: Vec<LocalDeviceView> = call(&a, Request::LocalDevices).await;
+    assert_eq!(local.iter().find(|d| d.id == id).unwrap().handover_seconds, Some(5));
+
+    // "Disconnect" ends the use; the client comes back by itself.
+    let since = dev.used_since.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let r: serde_json::Value = call(&a, Request::Disconnect { device: id.clone() }).await;
+    assert_eq!(r["disconnected"], 1);
+    let again = loop {
+        let local: Vec<LocalDeviceView> = call(&a, Request::LocalDevices).await;
+        let d = local.iter().find(|d| d.id == id).unwrap().clone();
+        if d.used_since.is_some_and(|t| t > since) {
+            break d;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(again.used_by.as_deref(), Some("laptop"));
+
     // Restarting B restores the attachment from its saved configuration.
     b.daemon.shutdown();
     drop(b);

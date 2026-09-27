@@ -680,7 +680,15 @@ pub mod demo {
                 device_protocol: 0,
                 configuration_value: 1,
                 num_configurations: 1,
-                interfaces: vec![InterfaceInfo::default()],
+                // Class by product: storage, HID (receiver), smart card reader.
+                interfaces: vec![InterfaceInfo {
+                    class: match product {
+                        "USB Receiver" => 0x03,
+                        "Smart Card Reader" => 0x0b,
+                        _ => 0x08,
+                    },
+                    ..InterfaceInfo::default()
+                }],
             },
             product: Some(product.into()),
             manufacturer: Some(mfr.into()),

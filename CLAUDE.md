@@ -135,7 +135,18 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   completely; Settings has a place to set up the missing role later
   (server → drivers, client → usbip-win2) and the reverse.
 
-### Device details, waiting queue and automatic handover (agreed 2026-09-27; not implemented yet)
+### Device details, waiting queue and automatic handover (implemented 2026-09-27; not yet tried on hardware)
+- Implementation: `handover.rs` (kinds, per-device `Handover` stored on
+  `SharedDevice`, `Offered::handover` = effective idle time); server
+  `Queues` (FIFO per device, `QUEUE_TTL` 15 s, `RESERVE_FOR` 10 s,
+  `handover_due` checks `relay::Activity` every second); busy errors carry
+  `queue_position`; clients retry every 2 s in `AttachState::Queued`.
+  API: `LocalDeviceView` gained `used_by_fingerprint`, `used_since`,
+  `queue`, `kind`, `handover`, `handover_seconds`; `Request::Disconnect`,
+  `Request::SetDeviceHandover`. UI: `deviceDialog()` (two columns:
+  permissions | status), rows of shared devices are clickable; Settings
+  has a web interface card (`webCard()`, app only; the web UI shows the
+  address and a note).
 - Clicking a device row on "This computer" opens a details dialog (the row
   switch keeps toggling sharing without opening it): name and ids; "In
   use by" (computer, since when) with a "Disconnect" button (ends the

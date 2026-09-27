@@ -104,8 +104,9 @@ sudo usbnexus web disable
   (and Linux) see a warning on first use: check the fingerprint shown by `web status`. Typing
   `localhost:3242` without `https://` is redirected.
 - The session cookie is `HttpOnly; Secure; SameSite=Strict`; pages are served with a strict CSP.
-- The web interface's own settings (on/off, network access, port, password) are changed in the
-  desktop app or on the command line of the computer itself, never through the web interface.
+- The web interface's own settings (on/off, network access, port, password) can be changed in the
+  desktop app, on the command line, or in the web interface itself (it warns before a change that
+  would cut the current page off).
 
 ## Building (for developers)
 

@@ -103,8 +103,9 @@ sudo usbnexus web disable
   girişte uyarır; `web status` çıktısındaki parmak iziyle doğrulayın. `https://` yazmadan
   `localhost:3242` yazılırsa yönlendirilir.
 - Oturum çerezi `HttpOnly; Secure; SameSite=Strict`, sayfalar sıkı bir CSP ile sunulur.
-- Web arayüzünün kendi ayarları (açık/kapalı, ağdan erişim, port, parola) masaüstü uygulamasından ya da
-  bilgisayarın kendisinde komut satırından değiştirilir; web arayüzünün içinden değiştirilemez.
+- Web arayüzünün kendi ayarları (açık/kapalı, ağdan erişim, port, parola) masaüstü uygulamasından,
+  komut satırından ya da web arayüzünün kendisinden değiştirilebilir (bu sayfayı erişilemez kılacak bir
+  değişiklikten önce uyarır).
 
 ## Derleme (geliştiriciler için)
 

@@ -247,8 +247,9 @@ struct WebState {
     daemon: Daemon,
     name: String,
     password_hash: String,
-    /// Session token -> expiry.
-    sessions: Mutex<HashMap<String, Instant>>,
+    /// Session token -> expiry; shared with the [`WebServer`] so a restart
+    /// after a settings change keeps the administrator signed in.
+    sessions: Sessions,
     /// Client address -> (consecutive failures, time of last failure).
     failures: Mutex<HashMap<IpAddr, (u32, Instant)>>,
 }
@@ -256,11 +257,16 @@ struct WebState {
 #[derive(Clone, Copy)]
 struct Peer(SocketAddr);
 
+/// Signed-in sessions: token -> expiry.
+pub type Sessions = Arc<Mutex<HashMap<String, Instant>>>;
+
 /// A running web interface; stops when dropped.
 pub struct WebServer {
     task: Option<JoinHandle<()>>,
     pub addr: SocketAddr,
     pub fingerprint: String,
+    /// Handed to the next server when the settings change.
+    pub sessions: Sessions,
     /// Whether the certificate is in this computer's trusted root store
     /// (see [`trust_locally`]); set by the daemon after starting.
     pub trusted_locally: bool,
@@ -286,7 +292,13 @@ impl Drop for WebServer {
 }
 
 /// Starts the web interface for `daemon`.
-pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSettings) -> Result<WebServer> {
+pub async fn start(
+    daemon: Daemon,
+    name: &str,
+    id: &Identity,
+    settings: &WebSettings,
+    sessions: Option<Sessions>,
+) -> Result<WebServer> {
     let password_hash = settings
         .password_hash
         .clone()
@@ -297,11 +309,12 @@ pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSett
     let addr = listener.local_addr()?;
     let port = addr.port();
     let acceptor = TlsAcceptor::from(tls_config(id)?);
+    let sessions = sessions.unwrap_or_default();
     let state = Arc::new(WebState {
         daemon,
         name: name.to_string(),
         password_hash,
-        sessions: Mutex::default(),
+        sessions: sessions.clone(),
         failures: Mutex::default(),
     });
     let app = router(state);
@@ -334,7 +347,7 @@ pub async fn start(daemon: Daemon, name: &str, id: &Identity, settings: &WebSett
             });
         }
     });
-    Ok(WebServer { task: Some(task), addr, fingerprint: fingerprint(&id.cert_der), trusted_locally: false })
+    Ok(WebServer { task: Some(task), addr, fingerprint: fingerprint(&id.cert_der), sessions, trusted_locally: false })
 }
 
 /// Answers a plain HTTP request on the HTTPS port with a redirect to the
@@ -555,9 +568,6 @@ async fn call(State(s): State<Arc<WebState>>, headers: HeaderMap, body: axum::bo
         Ok(r) => r,
         Err(e) => return error(StatusCode::BAD_REQUEST, "invalid", &e.to_string(), None),
     };
-    if matches!(req, Request::WebConfigure { .. }) {
-        return error(StatusCode::FORBIDDEN, "forbidden", "the web interface is configured locally", None);
-    }
     let resp: ApiResponse = s.daemon.handle(req).await;
     let status = match &resp {
         ApiResponse::Ok { .. } => StatusCode::OK,

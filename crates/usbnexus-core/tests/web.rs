@@ -159,8 +159,17 @@ async fn sign_in_and_use_the_api() {
         403,
         "API calls need the header even with a session"
     );
-    let reconfigure = r#"{"cmd":"web_configure","enabled":false}"#;
-    assert_eq!(request(port, "POST", "/api/call", &[CSRF, ("Cookie", &cookie)], reconfigure).await.status, 403);
+    // Reconfiguring from the web interface restarts the server (here on a
+    // new random port); the session survives the restart.
+    let reconfigure = r#"{"cmd":"web_configure","lan":true}"#;
+    let r = request(port, "POST", "/api/call", &[CSRF, ("Cookie", &cookie)], reconfigure).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+    assert_eq!(v["status"], "ok", "{}", r.body);
+    let status: WebStatusView = serde_json::from_value(v["data"].clone()).unwrap();
+    assert!(status.lan);
+    let port = status.port;
+    assert_eq!(request(port, "POST", "/api/call", &[CSRF, ("Cookie", &cookie)], call).await.status, 200);
 
     assert_eq!(request(port, "POST", "/api/logout", &[("Cookie", &cookie)], "").await.status, 204);
     assert_eq!(request(port, "POST", "/api/call", &[CSRF, ("Cookie", &cookie)], call).await.status, 401);

@@ -1211,9 +1211,6 @@ async function webCard() {
       : null,
     w.enabled && w.error ? h("p", { class: "form-error" }, w.error) : null,
   );
-  if (state.os === "web") {
-    return h("div", { class: "card" }, h("h2", {}, t("gui-web-title")), h("p", {}, t("gui-web-local-only-note")), info);
-  }
   const enabled = h("input", { type: "checkbox", checked: w.enabled });
   const local = h("input", { type: "radio", name: "web-access", value: "local", checked: !w.lan });
   const network = h("input", { type: "radio", name: "web-access", value: "network", checked: w.lan });
@@ -1249,6 +1246,13 @@ async function webCard() {
           }
           const args = { enabled: enabled.checked, lan: network.checked, port: Number(port.value) };
           if (pw1.value) args.password = pw1.value;
+          // From the web interface itself: warn when the change would cut
+          // this very page off, and follow a port change.
+          if (window.USBNEXUS_WEB) {
+            const fromNetwork = !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+            if (!args.enabled && !confirm(t("gui-web-confirm-off"))) return;
+            if (args.enabled && !args.lan && fromNetwork && !confirm(t("gui-web-confirm-local"))) return;
+          }
           try {
             await api("web_configure", args);
           } catch (err) {
@@ -1256,6 +1260,14 @@ async function webCard() {
             return;
           }
           toast(t("gui-saved"));
+          if (window.USBNEXUS_WEB && !args.enabled) {
+            form.replaceChildren(h("h2", {}, t("gui-web-title")), h("p", {}, t("gui-web-turned-off")));
+            return;
+          }
+          if (window.USBNEXUS_WEB && String(args.port) !== location.port) {
+            location.href = location.protocol + "//" + location.hostname + ":" + args.port + "/";
+            return;
+          }
           await render();
         });
       },

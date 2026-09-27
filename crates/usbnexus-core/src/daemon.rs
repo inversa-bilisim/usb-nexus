@@ -647,8 +647,11 @@ impl Daemon {
     async fn restart_web(&self) {
         let settings = self.inner.config.lock().unwrap().web.clone();
         let mut slot = self.inner.web.lock().await;
-        // Stop the old one (and drop its sessions) first.
+        // Stop the old one first; its sessions carry over so whoever changed
+        // the settings from the web interface stays signed in.
+        let mut sessions = None;
         if let Ok(Some(old)) = std::mem::replace(&mut *slot, Ok(None)) {
+            sessions = Some(old.sessions.clone());
             old.stop().await;
         }
         if !settings.enabled {
@@ -656,7 +659,7 @@ impl Daemon {
         }
         let started = async {
             let id = web::web_identity(&self.inner.state_dir, &self.inner.name)?;
-            let mut server = web::start(self.clone(), &self.inner.name, &id, &settings).await?;
+            let mut server = web::start(self.clone(), &self.inner.name, &id, &settings, sessions).await?;
             // Let this computer's browsers trust the certificate (Windows,
             // macOS). Failing is not fatal: the interface still works, with
             // a warning.

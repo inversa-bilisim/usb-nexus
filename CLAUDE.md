@@ -145,8 +145,9 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   `queue`, `kind`, `handover`, `handover_seconds`; `Request::Disconnect`,
   `Request::SetDeviceHandover`. UI: `deviceDialog()` (two columns:
   permissions | status), rows of shared devices are clickable; Settings
-  has a web interface card (`webCard()`, app only; the web UI shows the
-  address and a note).
+  has a web interface card (`webCard()`, also editable from the web UI:
+  confirms before cutting the page off, follows a port change; sessions
+  survive the restart).
 - Clicking a device row on "This computer" opens a details dialog (the row
   switch keeps toggling sharing without opening it): name and ids; "In
   use by" (computer, since when) with a "Disconnect" button (ends the

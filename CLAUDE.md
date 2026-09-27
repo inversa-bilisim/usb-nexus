@@ -182,6 +182,21 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   an "allow this user" button (`pkexec usbnexus allow-user USER`: usermod
   + setfacl on the socket for immediate effect).
 
+### Local certificate trust, tray icon, autostart (implemented 2026-09-27; not yet tried)
+- `web::trust_locally` adds `web-cert.der` to the machine's trusted root
+  store whenever the web interface starts (Windows: `certutil -addstore
+  Root`, macOS: `security add-trusted-cert`; Linux: nothing). New
+  certificates carry `ExplicitNoCa` + serverAuth. `service uninstall`
+  removes it (`untrust_locally`, SHA-1 thumbprint). `WebStatusView::
+  trusted_locally` selects the `gui-web-trusted` / `web-trusted` text.
+- Desktop app: Tauri `tray-icon` (menu "Open"/"Quit", left click opens;
+  menu re-translated by the `set_language` command), closing the window
+  hides it when a tray exists (`HasTray`), `tauri-plugin-single-instance`
+  brings the window back on a second launch, `tauri-plugin-autostart`
+  (`--hidden` argument starts in the tray; window `visible: false` until
+  setup) behind the Settings card `startupCard()` (`autostart_get/set`,
+  app only). Linux packages recommend libayatana-appindicator.
+
 ## Pending end-to-end tests (to run with real hardware)
 
 1. Linux ↔ Linux with a real USB stick.

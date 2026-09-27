@@ -46,6 +46,8 @@ Uygulama yetkisiz bir kullanıcı olarak çalışır ve tüm işleri arka planda
 (`usbnexus daemon`) yaptırır. Pencere kapatılsa bile paylaşımlar ve bağlantılar sürer; hizmet yeniden
 başladığında kayıtlı bağlantılar kendiliğinden geri kurulur.
 
+- **Bildirim alanı:** Pencere kapatılınca uygulama bildirim alanında (tepside) kalır; oturum açılınca
+  kendiliğinden başlayabilir (Ayarlar → Başlangıç).
 - **Kullanım şekli (roller):** Bir bilgisayar *sunucu* (USB cihazlarını paylaşır), *istemci* (başka
   bilgisayarların cihazlarını kullanır) ya da ikisi birden olabilir. Seçilmeyen rolün ekranları gizlenir;
   roller Windows kurulumunda seçilir, Ayarlar'dan değiştirilebilir.
@@ -96,8 +98,10 @@ sudo usbnexus web disable
 ```
 
 - Parola Argon2 ile saklanır; aynı adresten 5 hatalı denemeden sonra giriş 60 saniye kilitlenir.
-- Sertifika kendinden imzalıdır: tarayıcı ilk girişte uyarır; `web status` çıktısındaki parmak iziyle
-  doğrulayın. `https://` yazmadan `localhost:3242` yazılırsa yönlendirilir.
+- Sertifika kendinden imzalıdır. Windows ve macOS'ta hizmet sertifikayı bilgisayarın güvenilen
+  sertifikalarına ekler; o bilgisayardaki tarayıcılar uyarısız açar. Başka bilgisayarlar (ve Linux) ilk
+  girişte uyarır; `web status` çıktısındaki parmak iziyle doğrulayın. `https://` yazmadan
+  `localhost:3242` yazılırsa yönlendirilir.
 - Oturum çerezi `HttpOnly; Secure; SameSite=Strict`, sayfalar sıkı bir CSP ile sunulur.
 - Web arayüzünün kendi ayarları (açık/kapalı, ağdan erişim, port, parola) masaüstü uygulamasından ya da
   bilgisayarın kendisinde komut satırından değiştirilir; web arayüzünün içinden değiştirilemez.

@@ -296,7 +296,10 @@ fn stop_and_wait(service: &windows_service::service::Service) -> Result<()> {
     Ok(())
 }
 
-pub fn uninstall() -> Result<()> {
+pub fn uninstall(ctx: &Ctx) -> Result<()> {
+    if let Err(e) = usbnexus_core::web::untrust_locally(&ctx.dir) {
+        eprintln!("{e:#}");
+    }
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("opening the service manager (run as administrator)")?;
     let service = manager

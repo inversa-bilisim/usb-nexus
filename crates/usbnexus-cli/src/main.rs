@@ -348,7 +348,7 @@ async fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         #[cfg(windows)]
         Cmd::Service { action: ServiceCmd::Install(opts) } => winservice::install(ctx, opts).await,
         #[cfg(windows)]
-        Cmd::Service { action: ServiceCmd::Uninstall } => winservice::uninstall(),
+        Cmd::Service { action: ServiceCmd::Uninstall } => winservice::uninstall(ctx),
         #[cfg(windows)]
         Cmd::Service { action: ServiceCmd::Run } => unreachable!("handled in main"),
         Cmd::Pin { seconds } => pin(ctx, seconds).await,
@@ -949,7 +949,8 @@ fn print_web_status(s: &usbnexus_core::api::WebStatusView) {
         println!("{}", t!("web-local-only"));
     }
     if let Some(fp) = &s.fingerprint {
-        println!("{}", t!("web-fingerprint", fp = short_fingerprint(fp)));
+        let msg = if s.trusted_locally { "web-trusted" } else { "web-fingerprint" };
+        println!("{}", t!(msg, fp = short_fingerprint(fp)));
     }
 }
 

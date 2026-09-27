@@ -17,6 +17,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 usbnexus-core.workspace = true
 usbnexus-i18n.workspace = true
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde.workspace = true
 serde_json.workspace = true
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"

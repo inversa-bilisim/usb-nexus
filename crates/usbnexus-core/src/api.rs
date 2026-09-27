@@ -368,6 +368,10 @@ pub struct WebStatusView {
     pub urls: Vec<String>,
     /// SHA-256 fingerprint of the HTTPS certificate, to check browser warnings.
     pub fingerprint: Option<String>,
+    /// The certificate is in this computer's trusted root store, so local
+    /// browsers show no warning (Windows, macOS).
+    #[serde(default)]
+    pub trusted_locally: bool,
     /// Why the interface is not running although enabled.
     pub error: Option<String>,
 }

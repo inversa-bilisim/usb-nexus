@@ -41,6 +41,7 @@ async function loadStrings(lang) {
   state.languages = s.languages;
   state.messages = s.messages;
   document.documentElement.lang = s.lang;
+  if (!window.USBNEXUS_WEB) invoke("set_language", { lang: s.lang }).catch(() => {});
 }
 
 function errorText(err) {
@@ -1158,7 +1159,40 @@ async function pageSettings() {
   );
   const r = status.roles || { server: true, client: true };
   const web = await webCard();
-  return [pageHead(t("gui-settings-title"), null), rolesForm(r), web, r.server ? policyForm : null, retentionForm];
+  const startup = await startupCard();
+  return [pageHead(t("gui-settings-title"), null), rolesForm(r), web, startup, r.server ? policyForm : null, retentionForm];
+}
+
+// Desktop app only: start when the user signs in (the window closes into
+// the notification area).
+async function startupCard() {
+  if (window.USBNEXUS_WEB) return null;
+  let enabled;
+  try {
+    enabled = await invoke("autostart_get");
+  } catch {
+    return null;
+  }
+  if (enabled === null || enabled === undefined) return null;
+  const box = h("input", { type: "checkbox", checked: enabled });
+  box.addEventListener("change", () =>
+    act(async () => {
+      try {
+        await invoke("autostart_set", { enabled: box.checked });
+        toast(t("gui-saved"));
+      } catch (err) {
+        box.checked = !box.checked;
+        throw err;
+      }
+    }),
+  );
+  return h(
+    "div",
+    { class: "card" },
+    h("h2", {}, t("gui-startup-title")),
+    h("p", {}, t("gui-startup-body")),
+    h("div", { class: "checks" }, h("label", { class: "check" }, box, h("span", {}, t("gui-startup-enabled")))),
+  );
 }
 
 // The web interface: on/off, reachable from this computer only or the whole
@@ -1172,7 +1206,9 @@ async function webCard() {
     w.enabled && w.urls.length
       ? h("p", {}, t("gui-web-open-at"), " ", ...w.urls.flatMap((u, i) => [i ? ", " : null, h("code", {}, u)]))
       : null,
-    w.enabled && w.fingerprint ? h("p", { class: "note muted" }, t("gui-web-fingerprint", { fp: w.fingerprint })) : null,
+    w.enabled && w.fingerprint
+      ? h("p", { class: "note muted" }, t(w.trusted_locally ? "gui-web-trusted" : "gui-web-fingerprint", { fp: w.fingerprint }))
+      : null,
     w.enabled && w.error ? h("p", { class: "form-error" }, w.error) : null,
   );
   if (state.os === "web") {

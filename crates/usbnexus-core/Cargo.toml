@@ -35,6 +35,7 @@ if-addrs = "0.13"
 
 # Userspace USB access (macOS device sharing; optional elsewhere).
 rusb = { version = "0.9", features = ["vendored"], optional = true }
+sha1 = "0.10"
 
 [features]
 # Build the libusb device host on platforms other than macOS (for testing,

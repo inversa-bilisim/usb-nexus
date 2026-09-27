@@ -46,6 +46,8 @@ The app runs as an unprivileged user and asks the **USB Nexus service** (`usbnex
 background to do the work. Sharing and connections continue when the window is closed; after a
 service restart the saved connections are restored.
 
+- **Notification area:** closing the window keeps the app in the notification area (tray); it can
+  start automatically at sign-in (Settings → Startup).
 - **Roles:** a computer can be a *server* (shares its USB devices), a *client* (uses devices of other
   computers) or both. The screens of a role a computer does not have are hidden; roles are chosen in
   the Windows installer and can be changed under Settings.
@@ -97,8 +99,10 @@ sudo usbnexus web disable
 
 - The password is stored with Argon2; after 5 wrong attempts from one address, sign-in is locked
   for 60 seconds.
-- The certificate is self-signed: the browser warns on first use; check the fingerprint shown by
-  `web status`. Typing `localhost:3242` without `https://` is redirected.
+- The certificate is self-signed. On Windows and macOS the service adds it to the computer's own
+  trusted certificates, so browsers on that computer open it without a warning; other computers
+  (and Linux) see a warning on first use: check the fingerprint shown by `web status`. Typing
+  `localhost:3242` without `https://` is redirected.
 - The session cookie is `HttpOnly; Secure; SameSite=Strict`; pages are served with a strict CSP.
 - The web interface's own settings (on/off, network access, port, password) are changed in the
   desktop app or on the command line of the computer itself, never through the web interface.

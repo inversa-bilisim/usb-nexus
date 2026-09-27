@@ -656,7 +656,22 @@ impl Daemon {
         }
         let started = async {
             let id = web::web_identity(&self.inner.state_dir, &self.inner.name)?;
-            web::start(self.clone(), &self.inner.name, &id, &settings).await
+            let mut server = web::start(self.clone(), &self.inner.name, &id, &settings).await?;
+            // Let this computer's browsers trust the certificate (Windows,
+            // macOS). Failing is not fatal: the interface still works, with
+            // a warning.
+            if web::can_trust_locally() {
+                let path = web::cert_path(&self.inner.state_dir);
+                server.trusted_locally = match tokio::task::spawn_blocking(move || web::trust_locally(&path)).await {
+                    Ok(Ok(trusted)) => trusted,
+                    Ok(Err(e)) => {
+                        warn!("web certificate not added to the trusted store: {e:#}");
+                        false
+                    }
+                    Err(_) => false,
+                };
+            }
+            Ok::<_, anyhow::Error>(server)
         }
         .await;
         *slot = match started {
@@ -676,6 +691,7 @@ impl Daemon {
             Ok(None) => (None, None),
             Err(e) => (None, Some(e.clone())),
         };
+        let trusted_locally = matches!(&*slot, Ok(Some(s)) if s.trusted_locally);
         let port = running.as_ref().map(|r| r.1).unwrap_or(settings.port());
         WebStatusView {
             enabled: settings.enabled,
@@ -684,6 +700,7 @@ impl Daemon {
             password_set: settings.password_hash.is_some(),
             urls: if running.is_some() { web::urls(&settings, port, &self.inner.name) } else { vec![] },
             fingerprint: running.map(|r| r.0),
+            trusted_locally,
             error,
         }
     }

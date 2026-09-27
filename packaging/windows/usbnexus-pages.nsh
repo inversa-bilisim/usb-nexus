@@ -311,10 +311,16 @@ Function usbnexus_Configure
 FunctionEnd
 
 ; Leaving the finish page: opens the web interface just set up, in the
-; user's (not the elevated installer's) default browser.
+; user's (not the elevated installer's) default browser. When Windows is
+; about to restart (usbip-win2), it opens once after the next sign-in.
 Function usbnexus_FinishLeave
   ${If} $UN_PagesShown == 1
   ${AndIf} $UN_Web == 1
-    nsis_tauri_utils::RunAsUser "$WINDIR\explorer.exe" "https://localhost:$UN_WebPort/"
+    StrCpy $0 "https://localhost:$UN_WebPort/"
+    ${If} ${RebootFlag}
+      WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\RunOnce" "USB Nexus web" '"$WINDIR\explorer.exe" "$0"'
+    ${Else}
+      nsis_tauri_utils::RunAsUser "$WINDIR\explorer.exe" "$0"
+    ${EndIf}
   ${EndIf}
 FunctionEnd

@@ -4849,7 +4849,7 @@ dependencies = [
 
 [[package]]
 name = "usbnexus-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4869,7 +4869,7 @@ dependencies = [
 
 [[package]]
 name = "usbnexus-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4902,7 +4902,7 @@ dependencies = [
 
 [[package]]
 name = "usbnexus-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4917,7 +4917,7 @@ dependencies = [
 
 [[package]]
 name = "usbnexus-i18n"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fluent-bundle",
  "fluent-syntax",
@@ -4927,7 +4927,7 @@ dependencies = [
 
 [[package]]
 name = "usbnexus-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "serde",

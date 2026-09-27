@@ -11,7 +11,9 @@ installers. The GitHub repository is `inversa-bilisim/usb-nexus` (moved from
 - Code comments and docs inside source files are **English**.
 - The user interface must support multiple languages; **Turkish is mandatory**.
   All UI text lives in `locales/*.ftl` (Fluent); `cargo test -p usbnexus-i18n`
-  fails if any locale is missing a message. Never hard-code UI strings.
+  fails if any locale is missing a message. Never hard-code UI strings. A new
+  message must be added to every locale file (en, tr, de, es, fr, it,
+  pt-BR, ru, ja, zh-CN).
 - Never copy GPL-2.0-only code (Linux kernel). Other projects (usbipd-win,
   usbip-win2, VirtualBox headers) may be read for ABI/behaviour only.
 - Hardware testing is postponed; the owner will test everything at the end
@@ -96,8 +98,13 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
 - Installer texts are `setup-*` messages in `locales/*.ftl` (plain text),
   generated into `packaging/windows/usbnexus-strings.nsh`; the web UI
   follows the browser's languages.
-- More languages (e.g. French) will be added later: new `locales/xx.ftl`,
-  `LOCALES`, and the NSIS `languages` list.
+- Languages (2026-09-27): en, tr, de, es, fr, it, pt-BR, ru, ja, zh-CN
+  (`LOCALES` + `NSIS_LANGUAGES` in the i18n crate, `languages` in
+  `packaging/windows/tauri.bundle.json`). `match_locale` matches
+  language-region first, then the language alone (`pt` → `pt-BR`,
+  `zh-TW` → `zh-CN`). Adding one: new `locales/xx.ftl`, the three lists,
+  regenerate `usbnexus-strings.nsh`. The owner decided to stay unsigned for
+  now (SmartScreen note in the Windows README).
 
 ### Role selection in the Windows installer (implemented; not yet tried on Windows)
 - Implementation: `packaging/windows/installer.nsi` is the tauri-cli 2.12.0

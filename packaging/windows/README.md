@@ -14,8 +14,9 @@
 ## The installer
 
 `USB Nexus_*_x64-setup.exe` runs as administrator, in the language of Windows (English if that
-language is not available). After the install folder it asks how the computer will be used; all
-options are ticked by default:
+language is not available). The installer is not code-signed yet, so Windows SmartScreen may show
+"Windows protected your PC": click **More info → Run anyway**. After the install folder it asks
+how the computer will be used; all options are ticked by default:
 
 | Option | What it does |
 |---|---|

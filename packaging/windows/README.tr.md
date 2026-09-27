@@ -14,7 +14,9 @@
 ## Kurulum paketi
 
 `USB Nexus_*_x64-setup.exe` yönetici yetkisiyle, Windows'un dilinde çalışır (o dil yoksa İngilizce).
-Kurulum klasöründen sonra bilgisayarın nasıl kullanılacağını sorar; seçeneklerin hepsi işaretli gelir:
+Kurulum dosyası henüz kod imzalı olmadığından Windows SmartScreen "Windows bilgisayarınızı korudu"
+uyarısı gösterebilir: **Daha fazla bilgi → Yine de çalıştır** deyin. Kurulum klasöründen sonra
+bilgisayarın nasıl kullanılacağını sorar; seçeneklerin hepsi işaretli gelir:
 
 | Seçenek | Ne yapar |
 |---|---|

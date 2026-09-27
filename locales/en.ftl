@@ -150,7 +150,7 @@ peers-clients = Paired clients (allowed to use this computer's devices):
 ## Desktop app
 
 gui-nav-this-computer = This computer
-gui-nav-network = Network
+gui-nav-network = Computers on the network
 gui-nav-connected = Connected devices
 gui-nav-paired = Paired computers
 gui-language = Language
@@ -270,6 +270,7 @@ state-unplugged = not plugged in
 state-no-permission = no permission
 serve-denied = “{ $client }” is not allowed to use { $busid }.
 attach-waiting-device = The device is not plugged in on the server; waiting for it…
+attach-queued = Another computer is using the device; this one is number { $position } in the queue.
 policy-open = Every paired computer may use every shared device (open).
 policy-restricted = Paired computers may only use the devices they are allowed to use (restricted).
 history-header = Usage log (entries are kept for { $days } days):
@@ -290,6 +291,7 @@ gui-no-permission = No permission
 gui-no-permission-hint = The owner of that computer has not allowed this computer to use the device.
 gui-connect-when-plugged-in = Connects automatically as soon as the device is plugged in.
 gui-state-waiting-device = Waiting for the device
+gui-state-queued = In use elsewhere; number { $position } in the queue
 gui-save = Save
 gui-saved = Saved.
 gui-skip = Skip

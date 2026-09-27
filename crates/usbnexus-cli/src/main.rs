@@ -766,12 +766,14 @@ async fn attach(ctx: &Ctx, server: &str, device: &str) -> Result<()> {
     let backend = Arc::new(usbnexus_core::windows::WindowsImport::default());
     // Waiting for a device is reported once, not on every attempt.
     let waiting = std::cell::Cell::new(false);
+    let queue_position = std::cell::Cell::new(0);
     let events = |ev: AttachEvent| match ev {
         AttachEvent::Connecting { .. } if waiting.get() => {}
         AttachEvent::Connecting { addr } => println!("{}", t!("attach-connecting", addr = addr)),
         AttachEvent::Retrying { .. } if waiting.get() => {}
         AttachEvent::Attached { port, .. } => {
             waiting.set(false);
+            queue_position.set(0);
             println!("{}", t!("attach-attached", busid = device, port = port));
             println!("{}", t!("attach-stop-hint"));
         }
@@ -786,6 +788,13 @@ async fn attach(ctx: &Ctx, server: &str, device: &str) -> Result<()> {
             println!("{}", t!("attach-disconnected", reason = reason));
         }
         AttachEvent::Retrying { delay } => println!("{}", t!("attach-retrying", seconds = delay.as_secs_f64().ceil())),
+        // Printed when the place in the queue changes.
+        AttachEvent::Queued { position } => {
+            waiting.set(true);
+            if queue_position.replace(position) != position {
+                println!("{}", t!("attach-queued", position = position));
+            }
+        }
         AttachEvent::Detached => println!("{}", t!("attach-detached")),
     };
     tokio::select! {

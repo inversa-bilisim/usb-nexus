@@ -542,6 +542,7 @@ impl Daemon {
                         "no_such_device" | "access_denied" => AttachState::Waiting { seconds: 0, error },
                         _ => AttachState::Retrying { seconds: 0, error },
                     },
+                    AttachEvent::Queued { position } => AttachState::Queued { position },
                     AttachEvent::Detached => AttachState::Stopped,
                 };
                 *st.lock().unwrap() = next;

@@ -279,6 +279,11 @@ pub enum AttachState {
         seconds: u64,
         error: ApiError,
     },
+    /// Another computer uses the device; this one is `position` in the
+    /// queue (1 = next).
+    Queued {
+        position: u32,
+    },
     /// Detached on this computer (device removed or detached by the OS).
     Stopped,
     Failed {
@@ -567,7 +572,8 @@ mod tests {
 
     #[test]
     fn error_codes() {
-        let e: anyhow::Error = RemoteError { code: ErrorCode::DeviceBusy, message: "x".into() }.into();
+        let e: anyhow::Error =
+            RemoteError { code: ErrorCode::DeviceBusy, message: "x".into(), queue_position: None }.into();
         assert_eq!(ApiError::from_anyhow(&e).code, "device_busy");
         let e: anyhow::Error = ClientError::PairingRequired { name: "a".into(), fingerprint: "b".into() }.into();
         assert_eq!(ApiError::from_anyhow(&e).code, "pairing_required");

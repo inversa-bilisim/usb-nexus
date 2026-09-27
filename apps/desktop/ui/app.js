@@ -604,6 +604,8 @@ function attachBadge(a) {
       return a.error && a.error.code === "access_denied"
         ? h("span", { class: "badge danger" }, t("gui-no-permission"))
         : h("span", { class: "badge busy warn" }, t("gui-state-waiting-device"));
+    case "queued":
+      return h("span", { class: "badge busy warn" }, t("gui-state-queued", { position: a.position }));
     case "stopped":
       return h("span", { class: "badge" }, t("gui-state-stopped"));
     default:

@@ -147,7 +147,7 @@ peers-clients = Eşleştirilmiş istemciler (bu bilgisayarın cihazlarını kull
 ## Desktop app
 
 gui-nav-this-computer = Bu bilgisayar
-gui-nav-network = Ağ
+gui-nav-network = Ağdaki bilgisayarlar
 gui-nav-connected = Bağlı cihazlar
 gui-nav-paired = Eşleştirilmiş bilgisayarlar
 gui-language = Dil
@@ -267,6 +267,7 @@ state-unplugged = takılı değil
 state-no-permission = izin yok
 serve-denied = “{ $client }” bilgisayarının { $busid } cihazını kullanma izni yok.
 attach-waiting-device = Cihaz sunucuya takılı değil; takılması bekleniyor…
+attach-queued = Cihazı başka bir bilgisayar kullanıyor; bu bilgisayar sırada { $position }.
 policy-open = Eşleştirilmiş her bilgisayar paylaşılan her cihazı kullanabilir (açık).
 policy-restricted = Eşleştirilmiş bilgisayarlar yalnızca izin verilen cihazları kullanabilir (kısıtlı).
 history-header = Kullanım kaydı (kayıtlar { $days } gün saklanır):
@@ -287,6 +288,7 @@ gui-no-permission = İzin yok
 gui-no-permission-hint = O bilgisayarın sahibi bu bilgisayarın cihazı kullanmasına izin vermedi.
 gui-connect-when-plugged-in = Cihaz takılır takılmaz kendiliğinden bağlanır.
 gui-state-waiting-device = Cihaz bekleniyor
+gui-state-queued = Başka bilgisayar kullanıyor; sırada { $position }.
 gui-save = Kaydet
 gui-saved = Kaydedildi.
 gui-skip = Atla

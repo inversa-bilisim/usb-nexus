@@ -18,6 +18,7 @@ use usbnexus_proto::DeviceInfo;
 
 use crate::access::{DeviceAccess, Policy};
 use crate::device_id::DeviceId;
+use crate::handover::{DeviceKind, Handover};
 
 /// A local USB device that can be exported.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +63,9 @@ pub struct Offered {
     pub product: Option<String>,
     pub manufacturer: Option<String>,
     pub allowed: Allowed,
+    /// Idle time after which the device goes to the next waiting computer
+    /// (see [`crate::handover`]); `None`: it stays with its user.
+    pub handover: Option<std::time::Duration>,
 }
 
 impl Offered {
@@ -112,11 +116,19 @@ pub struct SharedDevice {
     pub manufacturer: Option<String>,
     #[serde(default)]
     pub access: DeviceAccess,
+    #[serde(default, skip_serializing_if = "Handover::is_default")]
+    pub handover: Handover,
 }
 
 impl SharedDevice {
     pub fn new(id: DeviceId) -> Self {
-        SharedDevice { id, product: None, manufacturer: None, access: DeviceAccess::default() }
+        SharedDevice {
+            id,
+            product: None,
+            manufacturer: None,
+            access: DeviceAccess::default(),
+            handover: Handover::default(),
+        }
     }
 }
 
@@ -133,6 +145,8 @@ enum SharedRepr {
         manufacturer: Option<String>,
         #[serde(default)]
         access: DeviceAccess,
+        #[serde(default)]
+        handover: Handover,
     },
 }
 
@@ -140,8 +154,8 @@ impl From<SharedRepr> for SharedDevice {
     fn from(r: SharedRepr) -> Self {
         match r {
             SharedRepr::Busid(b) => SharedDevice::new(DeviceId::parse(&b)),
-            SharedRepr::Full { id, product, manufacturer, access } => {
-                SharedDevice { id, product, manufacturer, access }
+            SharedRepr::Full { id, product, manufacturer, access, handover } => {
+                SharedDevice { id, product, manufacturer, access, handover }
             }
         }
     }
@@ -323,10 +337,9 @@ impl SharedExport {
             let present = connected.iter().find(|d| wanted.matches(d));
             let entry = match present {
                 Some(d) => SharedDevice {
-                    id: DeviceId::of(d),
                     product: d.product.clone(),
                     manufacturer: d.manufacturer.clone(),
-                    access: DeviceAccess::default(),
+                    ..SharedDevice::new(DeviceId::of(d))
                 },
                 // Not plugged in: shared as soon as it appears.
                 None => SharedDevice::new(wanted),
@@ -345,6 +358,16 @@ impl SharedExport {
             self.host().release(&d.info.busid)?;
         }
         Ok(true)
+    }
+
+    /// Changes the automatic handover setting of a shared device.
+    pub fn set_handover(&self, device: &str, handover: Handover) -> Result<()> {
+        let wanted = DeviceId::parse(device);
+        let connected = if wanted.is_legacy() { self.connected()? } else { vec![] };
+        let mut st = self.state.lock().unwrap();
+        let i = Self::find(&st.shared, &connected, &wanted).ok_or_else(|| not_shared(device))?;
+        st.shared[i].handover = handover;
+        Ok(())
     }
 
     /// Changes who may use a shared device.
@@ -396,6 +419,7 @@ impl SharedExport {
                 } else {
                     Allowed::Only(r.shared.access.allowed.clone())
                 },
+                handover: r.device.as_ref().and_then(|d| r.shared.handover.idle_time(DeviceKind::of(d))),
                 product: r.device.as_ref().and_then(|d| d.product.clone()).or(r.shared.product),
                 manufacturer: r.device.as_ref().and_then(|d| d.manufacturer.clone()).or(r.shared.manufacturer),
                 id: r.shared.id,

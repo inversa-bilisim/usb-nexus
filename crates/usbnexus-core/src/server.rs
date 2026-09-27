@@ -22,12 +22,19 @@ use crate::device_id::DeviceId;
 use crate::frame::{read_frame, write_frame};
 use crate::identity::Identity;
 use crate::pairing::{PairingWindow, Pake, Role};
-use crate::relay::relay;
+use crate::relay::{relay, Activity, Watched};
 use crate::trust::{now_unix, Peer, TrustStore};
 use crate::{tls, CONTROL_VERSION};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// A waiting client asks again every few seconds; one that stopped asking
+/// for this long has left the queue.
+const QUEUE_TTL: Duration = Duration::from_secs(15);
+/// How long a device that became free is kept for the first in the queue.
+const RESERVE_FOR: Duration = Duration::from_secs(10);
+/// How often an idle session is checked for handover.
+const HANDOVER_CHECK: Duration = Duration::from_secs(1);
 
 pub struct ServerConfig {
     pub name: String,
@@ -77,8 +84,43 @@ pub enum ServerEvent {
 struct ActiveUse {
     client: String,
     fingerprint: String,
+    since: std::time::SystemTime,
     /// Ends the session when notified.
     stop: Arc<Notify>,
+}
+
+/// A client waiting for a busy device.
+struct Waiter {
+    client: String,
+    fingerprint: String,
+    last_asked: Instant,
+}
+
+/// Who uses a device, as reported to interfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceSession {
+    pub client: String,
+    pub fingerprint: String,
+    pub since: std::time::SystemTime,
+}
+
+/// Device queues: waiting clients in order, and devices kept for the first
+/// of them after they became free.
+#[derive(Default)]
+struct Queues {
+    waiting: HashMap<String, Vec<Waiter>>,
+    /// Device identity -> (fingerprint, until).
+    reserved: HashMap<String, (String, Instant)>,
+}
+
+impl Queues {
+    fn prune(&mut self, now: Instant) {
+        for q in self.waiting.values_mut() {
+            q.retain(|w| now.duration_since(w.last_asked) < QUEUE_TTL);
+        }
+        self.waiting.retain(|_, q| !q.is_empty());
+        self.reserved.retain(|_, (_, until)| *until > now);
+    }
 }
 
 type EventSink = Arc<dyn Fn(ServerEvent) + Send + Sync>;
@@ -90,8 +132,9 @@ struct Inner {
     trust: TrustStore,
     backend: Arc<dyn ExportBackend>,
     pairing: Mutex<Option<PairingWindow>>,
-    /// Device identity -> the client using it.
+    /// Device identity -> the client using it. Lock before `queues`.
     in_use: Mutex<HashMap<String, ActiveUse>>,
+    queues: Mutex<Queues>,
     events: EventSink,
 }
 
@@ -116,6 +159,7 @@ impl Server {
                 backend: cfg.backend,
                 pairing: Mutex::new(None),
                 in_use: Mutex::new(HashMap::new()),
+                queues: Mutex::default(),
                 events,
             }),
         })
@@ -151,6 +195,30 @@ impl Server {
     pub fn in_use(&self) -> HashMap<String, (String, String)> {
         let in_use = self.inner.in_use.lock().unwrap();
         in_use.iter().map(|(id, u)| (id.clone(), (u.client.clone(), u.fingerprint.clone()))).collect()
+    }
+
+    /// Who uses which device (by identity), and since when.
+    pub fn sessions(&self) -> HashMap<String, DeviceSession> {
+        let in_use = self.inner.in_use.lock().unwrap();
+        in_use
+            .iter()
+            .map(|(id, u)| {
+                let s = DeviceSession { client: u.client.clone(), fingerprint: u.fingerprint.clone(), since: u.since };
+                (id.clone(), s)
+            })
+            .collect()
+    }
+
+    /// Computers waiting for a device, first in line first: (name,
+    /// fingerprint).
+    pub fn queue(&self, device: &str) -> Vec<(String, String)> {
+        let mut queues = self.inner.queues.lock().unwrap();
+        queues.prune(Instant::now());
+        queues
+            .waiting
+            .get(device)
+            .map(|q| q.iter().map(|w| (w.client.clone(), w.fingerprint.clone())).collect())
+            .unwrap_or_default()
     }
 
     /// Ends the sessions for which `stop(device identity, client
@@ -209,7 +277,7 @@ async fn send_error<S>(s: &mut S, code: ErrorCode, message: impl Into<String>) -
 where
     S: AsyncWrite + Unpin,
 {
-    write_frame(s, &ServerMsg::Error { code, message: message.into() }).await
+    write_frame(s, &ServerMsg::Error { code, message: message.into(), queue_position: None }).await
 }
 
 async fn handle(inner: Arc<Inner>, tcp: TcpStream, addr: SocketAddr) -> Result<()> {
@@ -386,15 +454,43 @@ struct Client<'a> {
     addr: SocketAddr,
 }
 
-/// Removes a device from the in-use set when dropped.
+/// Removes a device from the in-use set when dropped, and keeps it for the
+/// first waiting client for a moment.
 struct InUse<'a> {
-    set: &'a Mutex<HashMap<String, ActiveUse>>,
+    inner: &'a Inner,
     id: String,
 }
 
 impl Drop for InUse<'_> {
     fn drop(&mut self) {
-        self.set.lock().unwrap().remove(&self.id);
+        let mut in_use = self.inner.in_use.lock().unwrap();
+        in_use.remove(&self.id);
+        let mut queues = self.inner.queues.lock().unwrap();
+        let now = Instant::now();
+        queues.prune(now);
+        if let Some(next) = queues.waiting.get(&self.id).and_then(|q| q.first()) {
+            let reservation = (next.fingerprint.clone(), now + RESERVE_FOR);
+            queues.reserved.insert(self.id.clone(), reservation);
+        }
+    }
+}
+
+/// Resolves once the session should end so the device goes to the next
+/// computer: someone waits and the device has been idle for its handover
+/// time (read again every check, so setting changes apply at once).
+async fn handover_due(inner: &Inner, id: &str, activity: &Activity) {
+    loop {
+        tokio::time::sleep(HANDOVER_CHECK).await;
+        let idle = inner.backend.list().ok().and_then(|o| o.into_iter().find(|o| o.id.to_string() == id)?.handover);
+        let Some(idle) = idle else { continue };
+        if activity.idle() < idle {
+            continue;
+        }
+        let mut queues = inner.queues.lock().unwrap();
+        queues.prune(Instant::now());
+        if queues.waiting.get(id).is_some_and(|q| !q.is_empty()) {
+            return;
+        }
     }
 }
 
@@ -428,24 +524,52 @@ where
     };
     let busid = device.info.busid.clone();
     let stop = Arc::new(Notify::new());
+    // Claim the device, or join (or stay in) its queue.
     let claimed = {
         let mut in_use = inner.in_use.lock().unwrap();
-        if in_use.contains_key(&id) {
-            false
+        let mut queues = inner.queues.lock().unwrap();
+        let now = Instant::now();
+        queues.prune(now);
+        let kept_for_other = queues.reserved.get(&id).is_some_and(|(fp, _)| fp != client.fingerprint);
+        if in_use.contains_key(&id) || kept_for_other {
+            let q = queues.waiting.entry(id.clone()).or_default();
+            let pos = match q.iter().position(|w| w.fingerprint == client.fingerprint) {
+                Some(i) => i,
+                None => {
+                    q.push(Waiter {
+                        client: client.name.to_string(),
+                        fingerprint: client.fingerprint.to_string(),
+                        last_asked: now,
+                    });
+                    q.len() - 1
+                }
+            };
+            q[pos].last_asked = now;
+            Err(pos as u32 + 1)
         } else {
+            if let Some(q) = queues.waiting.get_mut(&id) {
+                q.retain(|w| w.fingerprint != client.fingerprint);
+            }
+            queues.reserved.remove(&id);
             let active = ActiveUse {
                 client: client.name.to_string(),
                 fingerprint: client.fingerprint.to_string(),
+                since: std::time::SystemTime::now(),
                 stop: stop.clone(),
             };
             in_use.insert(id.clone(), active);
-            true
+            Ok(())
         }
     };
-    if !claimed {
-        return send_error(&mut tls, ErrorCode::DeviceBusy, format!("{wanted} is in use")).await;
+    if let Err(position) = claimed {
+        let msg = ServerMsg::Error {
+            code: ErrorCode::DeviceBusy,
+            message: format!("{wanted} is in use"),
+            queue_position: Some(position),
+        };
+        return write_frame(&mut tls, &msg).await;
     }
-    let _guard = InUse { set: &inner.in_use, id: id.clone() };
+    let _guard = InUse { inner, id: id.clone() };
 
     let local = match inner.backend.export(&busid).await {
         Ok(s) => s,
@@ -464,8 +588,14 @@ where
     (inner.events)(ServerEvent::Exported(usage.clone()));
     let since = Instant::now();
 
+    let activity = Activity::default();
     tokio::select! {
-        end = relay(tls, local) => info!(busid, client = %client.name, ?end, "device released"),
+        end = relay(tls, Watched::new(local, activity.clone())) => {
+            info!(busid, client = %client.name, ?end, "device released")
+        }
+        _ = handover_due(inner, &id, &activity) => {
+            info!(busid, client = %client.name, "idle; handed over to the next computer")
+        }
         // Dropping the relay closes both sockets.
         _ = stop.notified() => info!(busid, client = %client.name, "session ended by the server"),
     }

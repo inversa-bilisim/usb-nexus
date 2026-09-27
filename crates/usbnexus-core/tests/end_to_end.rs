@@ -49,11 +49,16 @@ const DEVICE_ID: &str = "1234:5678:SER1";
 struct MockExport {
     plugged: AtomicBool,
     allowed: Mutex<Allowed>,
+    handover: Mutex<Option<Duration>>,
 }
 
 impl Default for MockExport {
     fn default() -> Self {
-        MockExport { plugged: AtomicBool::new(true), allowed: Mutex::new(Allowed::Everyone) }
+        MockExport {
+            plugged: AtomicBool::new(true),
+            allowed: Mutex::new(Allowed::Everyone),
+            handover: Mutex::new(None),
+        }
     }
 }
 
@@ -72,6 +77,7 @@ impl ExportBackend for MockExport {
             product: Some("Mock".into()),
             manufacturer: None,
             allowed: self.allowed.lock().unwrap().clone(),
+            handover: *self.handover.lock().unwrap(),
         }])
     }
 
@@ -277,14 +283,18 @@ async fn attach_relays_and_reconnects() {
     assert!(res.is_ok(), "{res:?}");
 }
 
+type Attaching = (Arc<MockImport>, mpsc::UnboundedReceiver<AttachEvent>, tokio::task::JoinHandle<Result<()>>);
+
 /// Starts `attach_forever` for `device` and forwards its events.
-fn spawn_attach(
-    f: &Fixture,
-    device: &str,
-) -> (Arc<MockImport>, mpsc::UnboundedReceiver<AttachEvent>, tokio::task::JoinHandle<Result<()>>) {
+fn spawn_attach(f: &Fixture, device: &str) -> Attaching {
+    spawn_attach_as(f, &f.client, device)
+}
+
+/// The same, as the client `cfg`.
+fn spawn_attach_as(f: &Fixture, cfg: &ClientConfig, device: &str) -> Attaching {
     let import = Arc::new(MockImport::default());
     let (tx, rx) = mpsc::unbounded_channel();
-    let (cfg, target, backend) = (f.client.clone(), Target::Addr(f.addr.clone()), import.clone());
+    let (cfg, target, backend) = (cfg.clone(), Target::Addr(f.addr.clone()), import.clone());
     let device = device.to_string();
     let task = tokio::spawn(async move {
         client::attach_forever(&cfg, &target, &device, backend, move |e| {
@@ -375,4 +385,64 @@ async fn attach_gives_up_on_permanent_errors() {
     let import: Arc<dyn ImportBackend> = Arc::new(MockImport::default());
     let res = client::attach_forever(&f.client, &Target::Addr(f.addr.clone()), DEVICE_ID, import, |_| {}).await;
     assert!(matches!(res.unwrap_err().downcast_ref::<ClientError>(), Some(ClientError::PairingRequired { .. })));
+}
+
+/// Waits for an event matching `want`.
+async fn expect_event(rx: &mut mpsc::UnboundedReceiver<AttachEvent>, what: &str, want: impl Fn(&AttachEvent) -> bool) {
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+            .unwrap();
+        if want(&ev) {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn busy_devices_queue_and_idle_ones_are_handed_over() {
+    let f = start().await;
+    f.server.open_pairing_with_pin("777777", Duration::from_secs(60));
+    client::connect(&f.client, &f.addr, Some("777777")).await.unwrap();
+    let second = ClientConfig {
+        name: "second-client".into(),
+        identity: Identity::generate("second-client").unwrap(),
+        trust: TrustStore::in_memory(),
+    };
+    f.server.open_pairing_with_pin("888888", Duration::from_secs(60));
+    client::connect(&second, &f.addr, Some("888888")).await.unwrap();
+
+    let (import_a, mut a, task_a) = spawn_attach(&f, DEVICE_ID);
+    expect_attached(&mut a).await;
+    assert_eq!(f.server.sessions()[DEVICE_ID].client, "test-client");
+
+    // The second computer waits in the queue.
+    let (import_b, mut b, task_b) = spawn_attach_as(&f, &second, DEVICE_ID);
+    expect_event(&mut b, "queued", |e| matches!(e, AttachEvent::Queued { position: 1 })).await;
+    let queue: Vec<String> = f.server.queue(DEVICE_ID).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(queue, ["second-client"]);
+
+    // Without handover the device stays with its user, idle or not.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(f.server.sessions()[DEVICE_ID].client, "test-client");
+    assert_eq!(import_a.kernel_ends.lock().unwrap().len(), 1);
+
+    // With handover it goes to the next computer once idle.
+    *f.export.handover.lock().unwrap() = Some(Duration::from_secs(1));
+    expect_attached(&mut b).await;
+    assert_eq!(f.server.sessions()[DEVICE_ID].client, "second-client");
+
+    // A device in use (traffic) is not taken away.
+    let mut kernel_b = import_b.kernel_ends.lock().unwrap().pop().unwrap();
+    let before = import_a.kernel_ends.lock().unwrap().len();
+    for _ in 0..8 {
+        echo(&mut kernel_b, b"urb").await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    assert_eq!(f.server.sessions()[DEVICE_ID].client, "second-client");
+    assert_eq!(import_a.kernel_ends.lock().unwrap().len(), before, "the first computer did not get it back");
+
+    task_a.abort();
+    task_b.abort();
 }

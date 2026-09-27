@@ -13,7 +13,7 @@ installers. The GitHub repository is `inversa-bilisim/usb-nexus` (moved from
   All UI text lives in `locales/*.ftl` (Fluent); `cargo test -p usbnexus-i18n`
   fails if any locale is missing a message. Never hard-code UI strings. A new
   message must be added to every locale file (en, tr, de, es, fr, it,
-  pt-BR, ru, ja, zh-CN).
+  pt-BR, ru, ja, zh-CN, az, bs, hr, sq, sr-Latn).
 - Never copy GPL-2.0-only code (Linux kernel). Other projects (usbipd-win,
   usbip-win2, VirtualBox headers) may be read for ABI/behaviour only.
 - Hardware testing is postponed; the owner will test everything at the end
@@ -100,7 +100,9 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   follows the browser's languages.
 - Languages (2026-09-27): en, tr, de, es, fr, it, pt-BR, ru, ja, zh-CN
   (`LOCALES` + `NSIS_LANGUAGES` in the i18n crate, `languages` in
-  `packaging/windows/tauri.bundle.json`). `match_locale` matches
+  `packaging/windows/tauri.bundle.json`); 0.1.2 adds az, bs, hr, sq,
+  sr-Latn in `LOCALES` only (Tauri's NSIS bundler has no texts for them,
+  so their installer is English). `match_locale` matches
   language-region first, then the language alone (`pt` → `pt-BR`,
   `zh-TW` → `zh-CN`). Adding one: new `locales/xx.ftl`, the three lists,
   regenerate `usbnexus-strings.nsh`. The owner decided to stay unsigned for

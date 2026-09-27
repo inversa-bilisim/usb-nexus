@@ -4,6 +4,18 @@ The section for a version tag becomes the text of its GitHub release
 (`release.yml` copies it into the draft). Keep the English part first and
 the Turkish part after the `---` line of each version.
 
+## 0.1.2
+
+- **Languages:** Azerbaijani, Bosnian, Croatian, Albanian and Serbian
+  (Latin) in the app, the web interface and the command line. The
+  installer stays in English for these five.
+
+---
+
+- **Diller:** Azerbaycan Türkçesi, Boşnakça, Hırvatça, Arnavutça ve Sırpça
+  (Latin); uygulamada, web arayüzünde ve komut satırında. Bu beş dilde
+  kurulum sihirbazı İngilizce kalır.
+
 ## 0.1.1
 
 Second pre-release. Tested on two Windows 11 computers, including moving a

@@ -28,7 +28,8 @@ Güvenli, kolay kurulan USB-over-IP çözümü (geliştirme aşamasında).
 ## Diller
 
 Arayüz **Türkçe, İngilizce, Almanca, İspanyolca, Fransızca, İtalyanca, Portekizce (Brezilya), Rusça,
-Japonca ve Basitleştirilmiş Çince**. Dil işletim sisteminden alınır (komut satırında ayrıca `LANG`);
+Japonca, Basitleştirilmiş Çince, Azerbaycan Türkçesi, Boşnakça, Hırvatça, Arnavutça ve Sırpça**
+(kurulum sihirbazı ilk on dili bilir; diğerlerinde sihirbaz İngilizce açılır). Dil işletim sisteminden alınır (komut satırında ayrıca `LANG`);
 `--lang tr` ile değiştirilebilir, uygulamada da bir dil kutusu vardır. Yeni bir dil eklemek için
 `locales/en.ftl` dosyasını kopyalayıp çevirin, `crates/usbnexus-i18n/src/lib.rs` içindeki `LOCALES` ve
 `NSIS_LANGUAGES` listelerine ve Windows kurulumunun dil listesine ekleyin. Eksik çeviri olursa testler

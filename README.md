@@ -28,7 +28,8 @@ Secure, easy-to-install USB over IP (in development).
 ## Languages
 
 The interface is available in **English, Turkish, German, Spanish, French, Italian, Portuguese
-(Brazil), Russian, Japanese and Simplified Chinese**. The language follows the operating system (on
+(Brazil), Russian, Japanese, Simplified Chinese, Azerbaijani, Bosnian, Croatian, Albanian and
+Serbian** (the installer itself has the first ten; for the others it is in English). The language follows the operating system (on
 the command line also `LANG`); `--lang tr` overrides it, and the app has a language box. To add a
 language, copy `locales/en.ftl`, translate it, and add it to `LOCALES` and `NSIS_LANGUAGES` in
 `crates/usbnexus-i18n/src/lib.rs` and to the Windows installer's language list. The tests fail if

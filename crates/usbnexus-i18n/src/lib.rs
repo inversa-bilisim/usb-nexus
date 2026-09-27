@@ -29,6 +29,11 @@ pub const LOCALES: &[(&str, &str, &str)] = &[
     ("ru", "Русский", include_str!("../../../locales/ru.ftl")),
     ("ja", "日本語", include_str!("../../../locales/ja.ftl")),
     ("zh-CN", "简体中文", include_str!("../../../locales/zh-CN.ftl")),
+    ("az", "Azərbaycan dili", include_str!("../../../locales/az.ftl")),
+    ("bs", "Bosanski", include_str!("../../../locales/bs.ftl")),
+    ("hr", "Hrvatski", include_str!("../../../locales/hr.ftl")),
+    ("sq", "Shqip", include_str!("../../../locales/sq.ftl")),
+    ("sr-Latn", "Srpski", include_str!("../../../locales/sr-Latn.ftl")),
 ];
 
 pub const FALLBACK: &str = "en";
@@ -167,6 +172,9 @@ pub fn templates(code: &str) -> std::collections::BTreeMap<String, String> {
 
 /// NSIS language of each locale, as named in the Windows installer's
 /// `languages` list (`packaging/windows/tauri.bundle.json`).
+/// Languages the installer can show. Tauri's NSIS bundler ships its own
+/// texts only for these; locales missing here (az, bs, hr, sq, sr-Latn)
+/// get an English installer and a translated program.
 const NSIS_LANGUAGES: &[(&str, &str)] = &[
     ("en", "English"),
     ("tr", "Turkish"),
@@ -315,12 +323,20 @@ mod tests {
         );
     }
 
+    /// Languages the installer cannot show (Tauri's NSIS bundler has no
+    /// texts for them); they get an English installer.
+    const INSTALLER_FALLBACK: &[&str] = &["az", "bs", "hr", "sq", "sr-Latn"];
+
     #[test]
     fn every_locale_is_in_the_installer() {
         let bundle = std::fs::read_to_string(repo_file("packaging/windows/tauri.bundle.json")).unwrap();
         for (code, _, _) in LOCALES {
+            if INSTALLER_FALLBACK.contains(code) {
+                assert!(!NSIS_LANGUAGES.iter().any(|(c, _)| c == code), "{code} is listed as a fallback");
+                continue;
+            }
             let (_, nsis) = NSIS_LANGUAGES.iter().find(|(c, _)| c == code).unwrap_or_else(|| {
-                panic!("add the NSIS language of {code} to NSIS_LANGUAGES");
+                panic!("add the NSIS language of {code} to NSIS_LANGUAGES (or to INSTALLER_FALLBACK)");
             });
             assert!(bundle.contains(&format!("\"{nsis}\"")), "add {nsis} to the languages in tauri.bundle.json");
         }
@@ -345,6 +361,11 @@ mod tests {
         assert_eq!(match_locale("pt"), Some("pt-BR"));
         assert_eq!(match_locale("zh-Hans-CN"), Some("zh-CN"));
         assert_eq!(match_locale("zh"), Some("zh-CN"));
+        assert_eq!(match_locale("sr-Latn-RS"), Some("sr-Latn"));
+        assert_eq!(match_locale("sr"), Some("sr-Latn"));
+        assert_eq!(match_locale("sr-Cyrl-RS"), Some("sr-Latn"));
+        assert_eq!(match_locale("hr_HR.UTF-8"), Some("hr"));
+        assert_eq!(match_locale("az-Latn-AZ"), Some("az"));
         assert_eq!(match_locale("xx_YY"), None);
         assert_eq!(detect(Some("tr")), "tr");
     }

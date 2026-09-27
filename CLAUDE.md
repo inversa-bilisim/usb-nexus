@@ -154,7 +154,11 @@ node --check apps/desktop/ui/app.js apps/desktop/ui/web.js
   licence dongles (known vendors: Thales Sentinel/HASP, WIBU CodeMeter,
   Feitian/Rockey, Marx, ...) and printers (class 07) on, 30 s. Unknown
   dongles fall under "others".
+- Decided: a computer that handed a device over rejoins the queue by
+  itself (two idle computers may pass it back and forth; accepted).
 - The device list itself stays as it is (few devices per computer).
+- Sidebar entry "Ağ" was renamed "Ağdaki bilgisayarlar" / "Computers on
+  the network".
 
 ## Pending end-to-end tests (to run with real hardware)
 

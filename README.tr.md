@@ -2,6 +2,60 @@
 
 [English](README.md) · **Türkçe**
 
+Ağınızdaki USB cihazlarını, bilgisayarınıza takılıymış gibi kullanın.
+
+USB Nexus, bir bilgisayara bağlı USB cihazlarının yerel ağ üzerindeki başka bir bilgisayarda güvenli biçimde kullanılmasını sağlar.
+
+Yazıcı, tarayıcı, lisans dongle’ı, depolama cihazı, kamera veya başka bir USB donanımı bir bilgisayara bağlı kalırken; cihazı fiziksel olarak taşımadan başka bir bilgisayardan kullanabilirsiniz.
+
+Ücretsiz. Açık kaynak. Kendi altyapınızda çalışır.
+Proje şu anda geliştirme aşamasındadır.
+
+Neden USB Nexus?
+
+İhtiyacınız olan USB cihazı başka bir bilgisayara, başka bir odaya veya ekransız çalışan bir sunucuya bağlı olabilir.
+
+USB Nexus bunu günlük kullanım için pratik hâle getirir:
+
+USB yazıcı ve tarayıcıları ağ üzerinde paylaşın.
+
+Lisans ve güvenlik dongle’larını ihtiyaç duyulan bilgisayarda kullanın.
+
+USB depolama ve özel donanımlara başka bir bilgisayardan erişin.
+
+Her bilgisayarı sunucu, istemci veya ikisi birden olarak kullanın.
+
+Cihazları masaüstü uygulaması ya da güvenli web arayüzünden yönetin.
+
+Ağ kesildiğinde, servis yeniden başladığında veya cihaz çıkarılıp tekrar takıldığında bağlantıların yeniden kurulmasını sağlayın.
+
+USB cihazı → Bilgisayar A (USB Nexus sunucusu)
+                              │
+                         Yerel ağ
+                              │
+                Bilgisayar B (USB Nexus istemcisi)
+                              │
+             Cihazı yerelde bağlıymış gibi kullanın
+
+Temel USB/IP’nin ötesinde
+
+USB Nexus, USB/IP teknolojisini temel alır; ancak eksiksiz ve yönetilebilir bir sistem için gereken ek özellikleri sunar:
+
+Güvenli eşleştirme — bilgisayarlar PIN ile bir kez eşleştirilir ve karşılıklı kimlik doğrulamalı TLS 1.3 üzerinden iletişim kurar.
+
+Otomatik keşif — IP adresi girmeden yerel ağdaki USB Nexus bilgisayarlarını bulun.
+
+Otomatik yeniden bağlanma — kesintilerden sonra kayıtlı cihaz bağlantıları yeniden kurulur.
+
+Erişim kontrolü — her paylaşılan USB cihazını hangi eşleşmiş bilgisayarların kullanabileceğini belirleyin.
+
+Kuyruk ve otomatik devir — birden çok bilgisayarın aynı cihazı sırayla kullanmasını sağlayın.
+
+Platformlar arası uygulamalar — Windows, Linux ve macOS için masaüstü desteği; ekransız sunucular için web arayüzü.
+
+İngilizce ve Türkçe arayüz — uygulama işletim sistemi dilini izler, ayrıca manuel dil seçimi sunar.
+
+Hedefimiz basit: USB over IP teknolojisini güvenli, anlaşılır ve günlük kullanım için pratik hâle getirmek.
 Güvenli, kolay kurulan USB-over-IP çözümü (geliştirme aşamasında).
 
 - Bir bilgisayarın USB cihazları ağ üzerinden başka bir bilgisayarda, oraya takılıymış gibi kullanılır.

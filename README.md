@@ -2,32 +2,20 @@
 
 **English** · [Türkçe](README.tr.md)
 Use USB devices anywhere on your network — as if they were plugged in locally.
-
 USB Nexus lets one computer securely share its USB devices with another computer over the local network.
-
 A printer, scanner, licence dongle, storage device, camera, or other USB hardware can stay connected to one computer while you use it from another — without moving the device.
-
 Free. Open source. Self-hosted.
 Currently in development.
 
-Why USB Nexus?
-
+**Why USB Nexus?**
 USB over IP is useful when the device you need is connected to the wrong computer, in another room, or attached to a headless machine.
-
 USB Nexus makes that practical for everyday use:
-
 Share USB printers and scanners across your network.
-
 Make USB licence or security dongles available where they are needed.
-
 Use USB storage and specialised hardware from another computer.
-
 Turn any computer into a server, client, or both.
-
 Manage devices from the desktop app or a secure web interface.
-
 Keep connections resilient when a network drops, a service restarts, or a device is unplugged and reconnected.
-
 USB device → Computer A (USB Nexus server)
                          │
                      Local network
@@ -37,23 +25,14 @@ USB device → Computer A (USB Nexus server)
           Use the device as if it were local
 
 Built for more than basic USB/IP
-
 USB Nexus builds on USB/IP technology and adds the features needed for a complete, manageable system:
-
 Secure pairing — computers are paired once with a PIN and communicate through mutually authenticated TLS 1.3.
-
 Automatic discovery — find USB Nexus computers on the local network without manually entering addresses.
-
 Automatic reconnection — restore saved device connections after interruptions.
-
 Access control — decide which paired computers may use each shared device.
-
 Queues and handover — let several computers request the same device, one at a time.
-
 Cross-platform apps — desktop support for Windows, Linux, and macOS, plus a web interface for headless servers.
-
 English and Turkish interface — the application follows the operating system language, with manual language selection available.
-
 Our goal is simple: make USB over IP secure, approachable, and practical.
 Secure, easy-to-install USB over IP (in development).
 

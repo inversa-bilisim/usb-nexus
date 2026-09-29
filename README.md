@@ -1,6 +1,7 @@
 # USB Nexus
 
 **English** · [Türkçe](README.tr.md)
+
 Use USB devices anywhere on your network — as if they were plugged in locally.
 USB Nexus lets one computer securely share its USB devices with another computer over the local network.
 A printer, scanner, licence dongle, storage device, camera, or other USB hardware can stay connected to one computer while you use it from another — without moving the device.
@@ -8,6 +9,7 @@ Free. Open source. Self-hosted.
 Currently in development.
 
 **Why USB Nexus?**
+
 USB over IP is useful when the device you need is connected to the wrong computer, in another room, or attached to a headless machine.
 USB Nexus makes that practical for everyday use:
 Share USB printers and scanners across your network.
